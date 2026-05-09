@@ -11,60 +11,46 @@ MCP server for the [SAP Business Accelerator Hub](https://api.sap.com) — searc
 
 ---
 
-## Option 1 — npx (no installation)
+## Installation
 
-The easiest way. Claude downloads and runs the server on demand via `npx`.
+### Claude Code (recommended)
 
-Add to your Claude user-scope config (`~/.claude.json`):
+Run once in your terminal to register the server at user scope:
+
+```bash
+claude mcp add --scope user sap-api-mcp -- npx -y github:nhm7/sap_api_mcp
+```
+
+That's it. Claude Code picks it up immediately — no restart needed.
+
+### Claude Desktop
+
+Add to your config file:
+
+- **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
   "mcpServers": {
     "sap-api-mcp": {
       "command": "npx",
-      "args": ["-y", "sap-api-mcp@latest"]
+      "args": ["-y", "github:nhm7/sap_api_mcp"]
     }
   }
 }
 ```
 
-> **Claude Desktop** users: edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) with the same `mcpServers` block.
+### Pre-built archive (no npx)
 
----
-
-## Option 2 — local clone
-
-```bash
-git clone https://github.com/nhm7/sap_api_mcp.git
-cd sap_api_mcp
-npm install
-```
-
-Then add to `~/.claude.json`:
-
-```json
-{
-  "mcpServers": {
-    "sap-api-mcp": {
-      "command": "node",
-      "args": ["/absolute/path/to/sap_api_mcp/index.js"]
-    }
-  }
-}
-```
-
----
-
-## Option 3 — pre-built release archive
-
-Each [GitHub Release](https://github.com/nhm7/sap_api_mcp/releases) ships a `sap-api-mcp-vX.Y.Z.tar.gz` that contains `index.js` and all production dependencies pre-bundled — no `npm install` needed.
+Each [GitHub Release](https://github.com/nhm7/sap_api_mcp/releases) ships a `sap-api-mcp.tar.gz` with `index.js` and all production dependencies pre-bundled — no `npm install` needed.
 
 ```bash
 # Download and extract
 curl -L https://github.com/nhm7/sap_api_mcp/releases/latest/download/sap-api-mcp.tar.gz | tar xz
-cd sap-api-mcp
 
-# Add to Claude (same as Option 2, just update the path)
+# Register with Claude Code
+claude mcp add --scope user sap-api-mcp -- node /absolute/path/to/sap-api-mcp/index.js
 ```
 
 ---
@@ -75,8 +61,7 @@ cd sap-api-mcp
 Opens Chrome/Edge/Brave, lets you sign in to api.sap.com, then closes the browser automatically once the session is detected.  
 Session cookies are saved to `~/.sap-api-mcp/cookies.json` and reused until they expire.
 
-> Required for `get_spec` on REST, SOAP, and GraphQL APIs.  
-> OData APIs work without login if you set `SAP_API_KEY` env var (see below).
+> Required for `get_spec` on REST, SOAP, and GraphQL APIs.
 
 ### `search_apis`
 Keyword search across the entire catalog. No login required.
@@ -123,29 +108,6 @@ Claude calls login
 ```
 
 Cookies are stored **locally only** — never committed to git or sent anywhere.
-
----
-
-## Optional: API Key for OData without login
-
-You can skip `login` for OData APIs by setting `SAP_API_KEY` in the MCP server config:
-
-```json
-{
-  "mcpServers": {
-    "sap-api-mcp": {
-      "command": "npx",
-      "args": ["-y", "sap-api-mcp@latest"],
-      "env": {
-        "SAP_API_KEY": "your-key-here"
-      }
-    }
-  }
-}
-```
-
-Get a free key at [api.sap.com](https://api.sap.com) → Settings → API Key.  
-REST, SOAP, and GraphQL specs always require `login` regardless of the API key.
 
 ---
 
