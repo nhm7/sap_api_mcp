@@ -54,16 +54,20 @@ function getAuthHeaders() {
   return {};
 }
 
-function isSessionValid(cookieString) {
-  return fetch(SESSION_TEST_URL, {
-    headers: { Accept: "*/*", Cookie: cookieString },
-    redirect: "manual",
-  })
-    .then((r) => {
-      const ct = r.headers.get("content-type") || "";
-      return !ct.includes("text/html") && r.status !== 302 && r.status < 500;
-    })
-    .catch(() => false);
+async function isSessionValid(cookieString) {
+  // SAP returns status 200 even for the login redirect page (JS redirect, not HTTP 3xx).
+  // We must check content-type: a real spec is application/octet-stream or application/json,
+  // NOT text/html.
+  try {
+    const r = await fetch(SESSION_TEST_URL, {
+      headers: { Accept: "*/*", Cookie: cookieString },
+      redirect: "follow",
+    });
+    const ct = r.headers.get("content-type") || "";
+    return !ct.includes("text/html") && r.status < 400;
+  } catch {
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
