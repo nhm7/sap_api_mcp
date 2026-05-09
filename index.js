@@ -8,20 +8,25 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execSync, spawn } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync, statSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from "fs";
 import { createServer } from "net";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
-import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 const CATALOG_BASE = "https://api.sap.com/odata/1.0/catalog.svc";
-const SEARCH_BASE = "https://api.sap.com/api/1.0/searchservice";
-const SAP_HUB_URL = "https://api.sap.com";
-const COOKIE_PATH = join(homedir(), ".sap-api-mcp", "cookies.json");
-const API_KEY = process.env.SAP_API_KEY || "";
+const SEARCH_BASE  = "https://api.sap.com/api/1.0/searchservice";
+const SAP_HUB_URL  = "https://api.sap.com";
+const COOKIE_PATH  = join(homedir(), ".sap-api-mcp", "cookies.json");
+const API_KEY      = process.env.SAP_API_KEY || "";
+
+// API used to verify session validity (OData spec download requires login)
+const SESSION_TEST_URL =
+  `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // ---------------------------------------------------------------------------
 // Cookie storage
@@ -36,7 +41,10 @@ function loadCookies() {
 
 function saveCookies(cookieString) {
   mkdirSync(join(homedir(), ".sap-api-mcp"), { recursive: true });
-  writeFileSync(COOKIE_PATH, JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2));
+  writeFileSync(
+    COOKIE_PATH,
+    JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2)
+  );
 }
 
 function getAuthHeaders() {
@@ -46,8 +54,20 @@ function getAuthHeaders() {
   return {};
 }
 
+function isSessionValid(cookieString) {
+  return fetch(SESSION_TEST_URL, {
+    headers: { Accept: "*/*", Cookie: cookieString },
+    redirect: "manual",
+  })
+    .then((r) => {
+      const ct = r.headers.get("content-type") || "";
+      return !ct.includes("text/html") && r.status !== 302 && r.status < 500;
+    })
+    .catch(() => false);
+}
+
 // ---------------------------------------------------------------------------
-// Browser detection (Chrome / Edge / Brave — anything Chromium-based)
+// Browser detection — returns { path, name } or null
 // ---------------------------------------------------------------------------
 function findChromiumBrowser() {
   const p = process.platform;
@@ -55,33 +75,40 @@ function findChromiumBrowser() {
   const candidates =
     p === "darwin"
       ? [
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-          "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-          "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+          { path: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", name: "Chrome" },
+          { path: "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge", name: "Edge" },
+          { path: "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser", name: "Brave" },
+          { path: "/Applications/Chromium.app/Contents/MacOS/Chromium", name: "Chromium" },
         ]
       : p === "win32"
       ? [
-          process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe",
-          process.env.PROGRAMFILES + "\\Google\\Chrome\\Application\\chrome.exe",
-          (process.env["PROGRAMFILES(X86)"] || "") + "\\Google\\Chrome\\Application\\chrome.exe",
-          process.env.LOCALAPPDATA + "\\Microsoft\\Edge\\Application\\msedge.exe",
-          process.env.PROGRAMFILES + "\\Microsoft\\Edge\\Application\\msedge.exe",
+          { path: (process.env.LOCALAPPDATA  || "") + "\\Google\\Chrome\\Application\\chrome.exe",   name: "Chrome" },
+          { path: (process.env.PROGRAMFILES  || "") + "\\Google\\Chrome\\Application\\chrome.exe",   name: "Chrome" },
+          { path: (process.env["PROGRAMFILES(X86)"] || "") + "\\Google\\Chrome\\Application\\chrome.exe", name: "Chrome" },
+          { path: (process.env.LOCALAPPDATA  || "") + "\\Microsoft\\Edge\\Application\\msedge.exe",  name: "Edge" },
+          { path: (process.env.PROGRAMFILES  || "") + "\\Microsoft\\Edge\\Application\\msedge.exe",  name: "Edge" },
         ]
-      : ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "microsoft-edge", "brave-browser"];
+      : [
+          { path: "google-chrome",        name: "Chrome" },
+          { path: "google-chrome-stable", name: "Chrome" },
+          { path: "chromium-browser",     name: "Chromium" },
+          { path: "chromium",             name: "Chromium" },
+          { path: "microsoft-edge",       name: "Edge" },
+          { path: "brave-browser",        name: "Brave" },
+        ];
 
-  for (const exe of candidates.filter(Boolean)) {
+  for (const { path, name } of candidates.filter((c) => c.path)) {
     try {
-      if (p === "linux") execSync(`which "${exe}"`, { stdio: "ignore" });
-      else statSync(exe);
-      return exe;
+      if (p === "linux") execSync(`which "${path}"`, { stdio: "ignore" });
+      else statSync(path);
+      return { path, name };
     } catch {}
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Get a free TCP port
+// Free TCP port helper
 // ---------------------------------------------------------------------------
 function getFreePort() {
   return new Promise((resolve) => {
@@ -93,43 +120,37 @@ function getFreePort() {
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 // ---------------------------------------------------------------------------
-// Login via Chrome DevTools Protocol (CDP)
+// Login via Chrome DevTools Protocol (CDP) — fully automated
 // ---------------------------------------------------------------------------
 async function doLogin() {
-  // Already have valid cookies?
+  // Check if existing session is still valid
   const existing = loadCookies();
   if (existing?.cookieString) {
-    const testUrl = `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
-    try {
-      const r = await fetch(testUrl, {
-        headers: { Accept: "*/*", Cookie: existing.cookieString },
-        redirect: "manual",
-      });
-      const ct = r.headers.get("content-type") || "";
-      if (!ct.includes("text/html") && r.status !== 302) {
-        return { status: "already_logged_in", message: "Already logged in. Session is still valid." };
-      }
-    } catch {}
-    // Session expired — fall through to re-login
+    if (await isSessionValid(existing.cookieString)) {
+      return { status: "already_logged_in", message: "Already logged in. Session is still valid." };
+    }
+    // Session expired — continue to re-login
   }
 
-  const browserPath = findChromiumBrowser();
-  if (!browserPath) {
+  // Find a Chromium-based browser
+  const browser = findChromiumBrowser();
+  if (!browser) {
     throw new Error(
-      "No Chromium-based browser found (Chrome, Edge, or Brave). " +
-      "Please install one and try again."
+      "No Chromium-based browser found on this system.\n" +
+      "Please install one of the following and try again:\n" +
+      "  • Chrome:  https://google.com/chrome\n" +
+      "  • Edge:    https://microsoft.com/edge\n" +
+      "  • Brave:   https://brave.com\n" +
+      "  • Chromium: https://chromium.org/getting-involved/download-chromium"
     );
   }
 
   const debugPort = await getFreePort();
   const profileDir = mkdtempSync(join(tmpdir(), "sap-mcp-"));
-  const PROTECTED_URL = `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
 
   const proc = spawn(
-    browserPath,
+    browser.path,
     [
       `--remote-debugging-port=${debugPort}`,
       `--user-data-dir=${profileDir}`,
@@ -143,85 +164,114 @@ async function doLogin() {
     { stdio: "ignore" }
   );
 
+  // Track whether the browser was closed by the user before login completed
+  let browserExited = false;
+  proc.on("exit", () => { browserExited = true; });
+  proc.on("error", (err) => { browserExited = true; });
+
   const cleanup = () => {
     try { proc.kill(); } catch {}
     try { rmSync(profileDir, { recursive: true, force: true }); } catch {}
   };
 
   try {
-    // Wait for browser to start and open the debugging port
+    // Wait for the browser's remote debugging port to become available
     let tabs = null;
-    for (let attempt = 0; attempt < 15; attempt++) {
+    for (let attempt = 0; attempt < 20; attempt++) {
       await sleep(1000);
+      if (browserExited) {
+        throw new Error(`${browser.name} failed to start or exited unexpectedly. Please try again.`);
+      }
       try {
         const res = await fetch(`http://127.0.0.1:${debugPort}/json`);
         tabs = await res.json();
         if (tabs.length) break;
       } catch {}
     }
-    if (!tabs?.length) throw new Error("Browser started but debugger is unreachable. Please try again.");
+    if (!tabs?.length) {
+      throw new Error(
+        `${browser.name} started but the debugger port is unreachable. ` +
+        "This can happen if another instance is already using that port. Please try again."
+      );
+    }
 
+    // Connect to the browser via WebSocket (native in Node.js 22+)
     const tab = tabs.find((t) => t.type === "page") || tabs[0];
     const ws = new WebSocket(tab.webSocketDebuggerUrl);
 
     await new Promise((resolve, reject) => {
-      ws.once("open", resolve);
-      ws.once("error", () => reject(new Error("WebSocket connection to browser failed.")));
-      setTimeout(() => reject(new Error("Browser connection timed out.")), 10_000);
+      ws.addEventListener("open", resolve, { once: true });
+      ws.addEventListener("error", () =>
+        reject(new Error(`Could not connect to ${browser.name} debugger. Please try again.`)),
+        { once: true }
+      );
+      setTimeout(() => reject(new Error("Browser debugger connection timed out.")), 12_000);
     });
 
+    // Minimal CDP client
     let msgId = 1;
     const cdp = (method, params = {}) =>
       new Promise((resolve, reject) => {
         const id = msgId++;
-        const onMsg = (data) => {
+        const onMsg = ({ data }) => {
           const msg = JSON.parse(data);
           if (msg.id !== id) return;
-          ws.off("message", onMsg);
-          msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
+          ws.removeEventListener("message", onMsg);
+          msg.error ? reject(new Error(`CDP error (${method}): ${msg.error.message}`)) : resolve(msg.result);
         };
-        ws.on("message", onMsg);
+        ws.addEventListener("message", onMsg);
         ws.send(JSON.stringify({ id, method, params }));
         setTimeout(() => {
-          ws.off("message", onMsg);
-          reject(new Error(`CDP timeout: ${method}`));
-        }, 10_000);
+          ws.removeEventListener("message", onMsg);
+          reject(new Error(`CDP command timed out: ${method}`));
+        }, 12_000);
       });
 
-    // Poll until the session cookies grant access to the protected endpoint
-    const deadline = Date.now() + 120_000;
+    // Poll every 3 seconds until the browser cookies grant access to the protected endpoint
+    const TIMEOUT_MS = 120_000;
+    const deadline   = Date.now() + TIMEOUT_MS;
     let cookieString = null;
 
     while (Date.now() < deadline) {
       await sleep(3000);
+
+      if (browserExited) {
+        throw new Error(
+          `${browser.name} was closed before login completed. ` +
+          "Please try again and keep the browser open until you see a success message."
+        );
+      }
+
       try {
-        const { cookies } = await cdp("Network.getCookies", { urls: ["https://api.sap.com"] });
+        const { cookies } = await cdp("Network.getCookies", { urls: [SAP_HUB_URL] });
         if (!cookies.length) continue;
 
         const str = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-        const testResp = await fetch(PROTECTED_URL, {
-          headers: { Accept: "*/*", Cookie: str },
-          redirect: "manual",
-        });
-        const ct = testResp.headers.get("content-type") || "";
-        if (!ct.includes("text/html") && testResp.status !== 302 && testResp.status < 500) {
+        if (await isSessionValid(str)) {
           cookieString = str;
           break;
         }
-      } catch {}
+      } catch {
+        // Transient CDP / network error — keep polling
+      }
     }
 
     ws.close();
+
     if (!cookieString) {
-      throw new Error("Login timed out after 2 minutes. Please try again and log in within that time.");
+      throw new Error(
+        "Login timed out after 2 minutes. " +
+        "Please call login() again and complete the sign-in within 2 minutes of the browser opening."
+      );
     }
 
     saveCookies(cookieString);
     return {
       status: "success",
       message:
-        "Logged in successfully. Cookies saved — you can now use get_spec for all API types (OData, REST, SOAP). " +
-        `Session stored at: ${COOKIE_PATH}`,
+        `Logged in successfully via ${browser.name}. ` +
+        "Session saved — get_spec now works for all API types (OData, REST, SOAP). " +
+        `Cookies stored at: ${COOKIE_PATH}`,
     };
   } finally {
     cleanup();
@@ -229,34 +279,53 @@ async function doLogin() {
 }
 
 // ---------------------------------------------------------------------------
-// API helpers
+// Fetch helpers
 // ---------------------------------------------------------------------------
 async function safeFetch(url, options = {}) {
-  const resp = await fetch(url, options);
+  let resp;
+  try {
+    resp = await fetch(url, options);
+  } catch (err) {
+    throw new Error(
+      `Network error reaching SAP API Hub: ${err.message}. ` +
+      "Please check your internet connection."
+    );
+  }
+
   const ct = resp.headers.get("content-type") || "";
   if (ct.includes("text/html") || resp.status === 302) {
     throw new Error(
-      "SAP returned a login page. Run the `login` tool first, follow the steps, " +
-      "then call `login` again with your browser cookies to authenticate."
+      "Authentication required. Run the `login` tool to log in to SAP Business Accelerator Hub."
+    );
+  }
+  if (resp.status === 404) {
+    throw new Error(
+      `Resource not found (404). Verify the API or package name is correct. URL: ${url}`
     );
   }
   if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`HTTP ${resp.status}: ${body.slice(0, 300)}`);
+    let body = "";
+    try { body = await resp.text(); } catch {}
+    throw new Error(`SAP API returned HTTP ${resp.status}: ${body.slice(0, 300)}`);
   }
   return resp;
 }
 
 async function fetchJson(url, options = {}) {
   const resp = await safeFetch(url, options);
-  return resp.json();
+  try {
+    return await resp.json();
+  } catch {
+    throw new Error("SAP API returned invalid JSON. Please try again.");
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Tool: search_apis
 // ---------------------------------------------------------------------------
 async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
-  top = Math.min(top, 50);
+  top = Math.min(Math.max(1, top), 50);
+
   const params = new URLSearchParams({
     searchterm: searchTerm,
     $top: String(top),
@@ -266,25 +335,38 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
     NoAgg: "true",
   });
   if (packageName) params.set("$parentTechnicalName", packageName);
-  if (apiType) params.set("$filter", `(SubType:["${apiType.toUpperCase()}"])`);
+  if (apiType)     params.set("$filter", `(SubType:["${apiType.toUpperCase()}"])`);
 
   const data = await fetchJson(`${SEARCH_BASE}?${params}`, {
     headers: { Accept: "application/json", ...getAuthHeaders() },
   });
 
-  const results = (data.hits?.hits || []).map((h) => {
+  const hits = data.hits?.hits || [];
+  if (!hits.length && data.hits?.total === 0) {
+    return {
+      total: 0,
+      returned: 0,
+      results: [],
+      note: packageName
+        ? `No APIs found matching "${searchTerm}" in package "${packageName}". ` +
+          "Verify the package name or broaden your search."
+        : `No APIs found matching "${searchTerm}".`,
+    };
+  }
+
+  const results = hits.map((h) => {
     const s = h._source;
     return {
-      displayName: s.DisplayName,
-      technicalName: s.Name,
-      shortText: s.ShortText,
-      version: s.Version,
-      apiType: s.SubType,
-      status: s.APIState,
-      package: s.ParentTechnicalName,
-      packageDisplayName: s.ParentDisplayName,
+      displayName:          s.DisplayName,
+      technicalName:        s.Name,
+      shortText:            s.ShortText,
+      version:              s.Version,
+      apiType:              s.SubType,
+      status:               s.APIState,
+      package:              s.ParentTechnicalName,
+      packageDisplayName:   s.ParentDisplayName,
       communicationScenario: s.additionalAttributeMap?.CommunicationScenario?.trim() || null,
-      businessObject: s.additionalAttributeMap?.BusinessObject?.trim() || null,
+      businessObject:        s.additionalAttributeMap?.BusinessObject?.trim() || null,
       url: `https://api.sap.com/api/${s.Name}/overview`,
     };
   });
@@ -296,7 +378,8 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
 // Tool: list_apis
 // ---------------------------------------------------------------------------
 async function listApis({ packageName, apiType, top = 50 }) {
-  top = Math.min(top, 100);
+  top = Math.min(Math.max(1, top), 100);
+
   let url =
     `${CATALOG_BASE}/ContentEntities.ContentPackages('${encodeURIComponent(packageName)}')/Artifacts` +
     `?$format=json&$top=${top}&$skip=0` +
@@ -311,13 +394,25 @@ async function listApis({ packageName, apiType, top = 50 }) {
 
   const results = (data.d?.results || []).map((r) => ({
     technicalName: r.Name,
-    displayName: r.DisplayName,
-    apiType: r.SubType,
-    status: r.State,
-    description: r.Description,
-    version: r.Version,
+    displayName:   r.DisplayName,
+    apiType:       r.SubType,
+    status:        r.State,
+    description:   r.Description,
+    version:       r.Version,
     url: `https://api.sap.com/api/${r.Name}/overview`,
   }));
+
+  if (!results.length) {
+    return {
+      package: packageName,
+      total: 0,
+      results: [],
+      note: apiType
+        ? `No ${apiType} APIs found in package "${packageName}".`
+        : `No APIs found in package "${packageName}". ` +
+          "Verify the package name using search_apis with a keyword search.",
+    };
+  }
 
   return { package: packageName, total: results.length, results };
 }
@@ -326,75 +421,133 @@ async function listApis({ packageName, apiType, top = 50 }) {
 // Tool: get_spec
 // ---------------------------------------------------------------------------
 async function getSpec({ apiName }) {
-  // Download the raw spec from the catalog ($value)
+  // Look up the API type first (no auth needed) so we can give better errors
+  let apiType = null;
+  try {
+    const metaUrl =
+      `${CATALOG_BASE}/Artifacts(Name='${encodeURIComponent(apiName)}',Type='API')` +
+      `?$format=json&$select=Name,SubType`;
+    const meta = await fetchJson(metaUrl, {
+      headers: { Accept: "application/json", ...getAuthHeaders() },
+    });
+    apiType = meta.d?.SubType ?? null;
+  } catch (err) {
+    if (err.message.includes("404")) {
+      throw new Error(
+        `API "${apiName}" not found in the SAP catalog. ` +
+        "Use search_apis to find the correct technical name."
+      );
+    }
+    // Non-fatal — we'll still attempt the spec download
+  }
+
+  // For REST / SOAP / GraphQL, login is required; warn early
+  const needsLogin = apiType && !["ODATA", "ODATAV4"].includes(apiType);
+  if (needsLogin && !loadCookies()?.cookieString) {
+    return {
+      api: apiName,
+      apiType,
+      error: "login_required",
+      message:
+        `"${apiName}" is a ${apiType} API. ` +
+        "Run the `login` tool first to access the full specification.",
+    };
+  }
+
+  // Download the raw spec
   const specUrl =
     `${CATALOG_BASE}/Artifacts(Name='${encodeURIComponent(apiName)}',Type='API')/$value`;
 
-  const resp = await safeFetch(specUrl, {
-    headers: { Accept: "*/*", ...getAuthHeaders() },
-  });
-
-  const ct = resp.headers.get("content-type") || "";
-  const raw = await resp.text();
-
-  // JSON → OpenAPI (REST or OData published as Swagger)
-  if (ct.includes("json") || raw.trimStart().startsWith("{")) {
-    return parseOpenApi(apiName, raw);
+  let raw, ct;
+  try {
+    const resp = await safeFetch(specUrl, {
+      headers: { Accept: "*/*", ...getAuthHeaders() },
+    });
+    ct  = resp.headers.get("content-type") || "";
+    raw = await resp.text();
+  } catch (err) {
+    // Give a more specific message if it's an auth error and we don't know the type yet
+    if (err.message.includes("Authentication required") && !apiType) {
+      throw new Error(
+        `Downloading the spec for "${apiName}" requires login. ` +
+        "Run the `login` tool first, then try again."
+      );
+    }
+    throw err;
   }
 
-  // XML → either OData EDMX or SOAP WSDL
-  if (ct.includes("xml") || raw.trimStart().startsWith("<")) {
-    if (raw.includes("edmx:Edmx") || raw.includes("Edmx")) {
-      return parseEdmx(apiName, raw);
+  // Parse based on content
+  try {
+    if (ct.includes("json") || raw.trimStart().startsWith("{")) {
+      return parseOpenApi(apiName, raw);
     }
-    if (raw.includes("wsdl:definitions") || raw.includes("definitions")) {
-      return parseWsdl(apiName, raw);
+    if (ct.includes("xml") || raw.trimStart().startsWith("<")) {
+      if (raw.includes("edmx:Edmx") || raw.includes("<edmx:")) {
+        return parseEdmx(apiName, raw);
+      }
+      if (raw.includes("wsdl:definitions") || raw.includes(":definitions")) {
+        return parseWsdl(apiName, raw);
+      }
     }
+  } catch (parseErr) {
+    return {
+      api: apiName,
+      apiType,
+      warning: `Spec downloaded but could not be fully parsed: ${parseErr.message}`,
+      rawPreview: raw.slice(0, 1000),
+    };
   }
 
-  // Fallback: return raw (truncated)
-  return { api: apiName, format: "unknown", raw: raw.slice(0, 2000) };
+  return { api: apiName, apiType, format: "unknown", rawPreview: raw.slice(0, 1000) };
 }
 
 // ---------------------------------------------------------------------------
 // Spec parsers
 // ---------------------------------------------------------------------------
 function parseOpenApi(apiName, raw) {
-  const spec = JSON.parse(raw);
-  const version = spec.openapi || spec.swagger || "unknown";
+  let spec;
+  try {
+    spec = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid JSON in OpenAPI spec.");
+  }
+
   const paths = spec.paths || {};
+  const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
   const endpoints = Object.entries(paths).flatMap(([path, methods]) =>
     Object.entries(methods)
-      .filter(([m]) => ["get", "post", "put", "patch", "delete"].includes(m))
+      .filter(([m]) => HTTP_METHODS.has(m))
       .map(([method, op]) => ({
         method: method.toUpperCase(),
         path,
-        summary: op.summary || op.description || null,
+        summary: op.summary || op.operationId || null,
         parameters: (op.parameters || []).map((p) => ({
-          name: p.name,
-          in: p.in,
-          required: p.required || false,
-          type: p.schema?.type || p.type || null,
+          name:        p.name,
+          in:          p.in,
+          required:    p.required || false,
+          type:        p.schema?.type || p.type || null,
           description: p.description || null,
         })),
         requestBody: op.requestBody
           ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema)
           : null,
         responses: Object.entries(op.responses || {}).map(([code, r]) => ({
-          status: code,
+          status:      code,
           description: r.description || null,
-          schema: summarizeSchema(r.content?.["application/json"]?.schema || r.schema),
+          schema:      summarizeSchema(
+            r.content?.["application/json"]?.schema || r.schema || null
+          ),
         })),
       }))
   );
 
   return {
-    api: apiName,
-    format: "OpenAPI",
-    specVersion: version,
-    title: spec.info?.title,
-    description: spec.info?.description,
+    api:           apiName,
+    format:        "OpenAPI",
+    specVersion:   spec.openapi || spec.swagger || "unknown",
+    title:         spec.info?.title        || null,
+    description:   spec.info?.description  || null,
     endpointCount: endpoints.length,
     endpoints,
   };
@@ -404,6 +557,7 @@ function parseEdmx(apiName, xml) {
   const entityTypes = [];
   const etRegex = /<EntityType[^>]+Name="([^"]+)"[^>]*>([\s\S]*?)<\/EntityType>/g;
   let m;
+
   while ((m = etRegex.exec(xml)) !== null) {
     const name = m[1];
     const body = m[2];
@@ -411,36 +565,46 @@ function parseEdmx(apiName, xml) {
     const keyFields = [...body.matchAll(/<PropertyRef\s+Name="([^"]+)"/g)].map((k) => k[1]);
 
     const properties = [...body.matchAll(/<Property\s([^/]*?)\/>/g)].map((p) => {
-      const a = p[1];
-      const attr = (n) => a.match(new RegExp(`${n}="([^"]*)"`)) ?.[1] ?? null;
+      const a   = p[1];
+      const get = (n) => a.match(new RegExp(`${n}="([^"]*)"`)) ?.[1] ?? null;
       return {
-        name: attr("Name"),
-        type: attr("Type"),
-        nullable: attr("Nullable") !== "false",
-        maxLength: attr("MaxLength") ? Number(attr("MaxLength")) : undefined,
-        label: attr("sap:label") || undefined,
+        name:      get("Name"),
+        type:      get("Type"),
+        nullable:  get("Nullable") !== "false",
+        maxLength: get("MaxLength") ? Number(get("MaxLength")) : undefined,
+        label:     get("sap:label")  || undefined,
       };
     });
 
     entityTypes.push({ entityType: name, keyFields, properties });
   }
 
+  if (!entityTypes.length) {
+    throw new Error("Could not parse any EntityTypes from the EDMX document.");
+  }
+
   return { api: apiName, format: "OData EDMX", entityTypeCount: entityTypes.length, entityTypes };
 }
 
 function parseWsdl(apiName, xml) {
-  const operations = [...xml.matchAll(/<(?:wsdl:)?operation\s+name="([^"]+)"/g)].map(
-    (m) => m[1]
-  );
+  const operations = [
+    ...xml.matchAll(/<(?:wsdl:)?operation\s+name="([^"]+)"/g),
+  ].map((m) => m[1]);
 
-  const messages = [...xml.matchAll(/<(?:wsdl:)?message\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:wsdl:)?message>/g)].map(
-    (m) => {
-      const parts = [...m[2].matchAll(/<(?:wsdl:)?part\s+name="([^"]+)"\s+(?:element|type)="([^"]+)"/g)].map(
-        (p) => ({ name: p[1], type: p[2] })
-      );
-      return { message: m[1], parts };
-    }
-  );
+  const messages = [
+    ...xml.matchAll(
+      /<(?:wsdl:)?message\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/(?:wsdl:)?message>/g
+    ),
+  ].map((m) => ({
+    message: m[1],
+    parts: [...m[2].matchAll(
+      /<(?:wsdl:)?part\s+name="([^"]+)"\s+(?:element|type)="([^"]+)"/g
+    )].map((p) => ({ name: p[1], type: p[2] })),
+  }));
+
+  if (!operations.length) {
+    throw new Error("Could not parse any operations from the WSDL document.");
+  }
 
   return { api: apiName, format: "SOAP WSDL", operationCount: operations.length, operations, messages };
 }
@@ -467,7 +631,7 @@ function summarizeSchema(schema) {
 // MCP Server
 // ---------------------------------------------------------------------------
 const server = new Server(
-  { name: "sap-api-mcp", version: "2.0.0" },
+  { name: "sap-api-mcp", version: "3.0.0" },
   { capabilities: { tools: {} } }
 );
 
@@ -476,27 +640,34 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "login",
       description:
-        "Log in to SAP Business Accelerator Hub. Opens a browser window on api.sap.com automatically " +
-        "(works on Mac, Linux, Windows). Log in normally — the session is captured automatically once " +
-        "the login is detected. Required for get_spec on REST and SOAP APIs. " +
-        "Cookies are saved at ~/.sap-api-mcp/cookies.json and reused across sessions.",
+        "Log in to SAP Business Accelerator Hub. Automatically opens a browser window " +
+        "(Chrome, Edge, or Brave — detected on Mac, Linux, and Windows). " +
+        "Log in normally; the session is captured automatically once detected. " +
+        "The browser closes by itself when done. " +
+        "Required for get_spec on REST, SOAP, and GraphQL APIs. " +
+        "Session is saved at ~/.sap-api-mcp/cookies.json and reused until it expires.",
       inputSchema: { type: "object", properties: {} },
     },
     {
       name: "search_apis",
       description:
-        "Search for APIs on SAP Business Accelerator Hub. Returns matching APIs with technical names, " +
-        "types, packages, communication scenarios and business objects. No login required.",
+        "Search for APIs on SAP Business Accelerator Hub (api.sap.com). " +
+        "Returns matching APIs with technical names, types, packages, " +
+        "communication scenarios and business objects. No login required.",
       inputSchema: {
         type: "object",
         properties: {
           searchTerm: {
             type: "string",
-            description: 'Keyword to search for, e.g. "sales order", "business partner", "material".',
+            description:
+              'Keyword to search for, e.g. "sales order", "business partner", "material". ' +
+              'Use "*" to list all APIs.',
           },
           packageName: {
             type: "string",
-            description: 'Filter by product package technical name, e.g. "SAPS4HANACloud".',
+            description:
+              'Filter by product package technical name, e.g. "SAPS4HANACloud", ' +
+              '"SAPSuccessFactors". Use list_apis to browse a specific package.',
           },
           apiType: {
             type: "string",
@@ -514,14 +685,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "list_apis",
       description:
-        "List all APIs in a specific SAP product package. Use the technicalName from search results " +
-        "or known package names like \"SAPS4HANACloud\". No login required.",
+        "List all APIs in a specific SAP product package. " +
+        'Use the package technicalName from search results, e.g. "SAPS4HANACloud". ' +
+        "No login required.",
       inputSchema: {
         type: "object",
         properties: {
           packageName: {
             type: "string",
-            description: 'Package technical name, e.g. "SAPS4HANACloud", "SAPSuccessFactors".',
+            description:
+              'Package technical name, e.g. "SAPS4HANACloud", "SAPSuccessFactors", ' +
+              '"SAPExtendedWarehouseManagement".',
           },
           apiType: {
             type: "string",
@@ -539,18 +713,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_spec",
       description:
-        "Download and parse the full specification for any SAP API. " +
-        "Returns structured schema with all fields, types and operations:\n" +
-        "- OData (V2/V4): entity types, key fields, all properties with types\n" +
-        "- REST: all endpoints, parameters, request/response schemas\n" +
-        "- SOAP: operations, message parts and types\n" +
-        "Requires login for REST and SOAP. OData may work with SAP_API_KEY env var.",
+        "Download and parse the full specification for any SAP API:\n" +
+        "• OData V2/V4 — entity types, key fields, all properties with types and labels\n" +
+        "• REST        — all endpoints, path/query parameters, request/response schemas\n" +
+        "• SOAP        — operations, message parts and element types\n" +
+        "OData APIs work with SAP_API_KEY env var or after login. " +
+        "REST, SOAP, and GraphQL require login.",
       inputSchema: {
         type: "object",
         properties: {
           apiName: {
             type: "string",
-            description: 'Technical API name, e.g. "API_BUSINESS_PARTNER", "CE_SALES_ORDERS_0001".',
+            description:
+              'Technical API name, e.g. "API_BUSINESS_PARTNER", "CE_SALES_ORDERS_0001". ' +
+              "Use search_apis or list_apis to find the correct name.",
           },
         },
         required: ["apiName"],
@@ -564,10 +740,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case "login":        result = await doLogin(); break;
-      case "search_apis":  result = await searchApis(args); break;
-      case "list_apis":    result = await listApis(args); break;
-      case "get_spec":     result = await getSpec(args); break;
+      case "login":       result = await doLogin();         break;
+      case "search_apis": result = await searchApis(args);  break;
+      case "list_apis":   result = await listApis(args);    break;
+      case "get_spec":    result = await getSpec(args);     break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
@@ -580,4 +756,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("sap-api-mcp v2 running on stdio");
+console.error("sap-api-mcp v3 running on stdio");
