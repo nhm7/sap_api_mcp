@@ -12,6 +12,7 @@ import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync }
 import { createServer } from "net";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
+import AdmZip from "adm-zip";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -55,16 +56,16 @@ function getAuthHeaders() {
 }
 
 async function isSessionValid(cookieString) {
-  // SAP returns status 200 even for the login redirect page (JS redirect, not HTTP 3xx).
-  // We must check content-type: a real spec is application/octet-stream or application/json,
-  // NOT text/html.
+  // SAP returns HTTP 200 even for the JS-based login redirect page.
+  // A real authenticated response has content-type application/zip (spec download),
+  // never text/html.
   try {
     const r = await fetch(SESSION_TEST_URL, {
       headers: { Accept: "*/*", Cookie: cookieString },
       redirect: "follow",
     });
     const ct = r.headers.get("content-type") || "";
-    return !ct.includes("text/html") && r.status < 400;
+    return ct.includes("zip") || ct.includes("json") || ct.includes("xml") || ct.includes("octet-stream");
   } catch {
     return false;
   }
@@ -442,7 +443,6 @@ async function getSpec({ apiName }) {
         "Use search_apis to find the correct technical name."
       );
     }
-    // Non-fatal — we'll still attempt the spec download
   }
 
   // For REST / SOAP / GraphQL, login is required; warn early
@@ -458,51 +458,86 @@ async function getSpec({ apiName }) {
     };
   }
 
-  // Download the raw spec
+  // Download the spec (returns as application/zip)
   const specUrl =
     `${CATALOG_BASE}/Artifacts(Name='${encodeURIComponent(apiName)}',Type='API')/$value`;
 
-  let raw, ct;
+  let buffer;
   try {
     const resp = await safeFetch(specUrl, {
       headers: { Accept: "*/*", ...getAuthHeaders() },
     });
-    ct  = resp.headers.get("content-type") || "";
-    raw = await resp.text();
+    const ct = resp.headers.get("content-type") || "";
+    if (!ct.includes("zip") && !ct.includes("octet-stream") && !ct.includes("json") && !ct.includes("xml")) {
+      throw new Error(
+        `Unexpected content-type "${ct}". ` +
+        "Run the `login` tool first if you haven't already."
+      );
+    }
+    const arrayBuf = await resp.arrayBuffer();
+    buffer = Buffer.from(arrayBuf);
   } catch (err) {
-    // Give a more specific message if it's an auth error and we don't know the type yet
     if (err.message.includes("Authentication required") && !apiType) {
       throw new Error(
-        `Downloading the spec for "${apiName}" requires login. ` +
-        "Run the `login` tool first, then try again."
+        `Spec for "${apiName}" requires login. Run the \`login\` tool first.`
       );
     }
     throw err;
   }
 
-  // Parse based on content
+  // Extract the relevant file from the ZIP
+  const { content, filename } = extractFromZip(buffer, apiName);
+  return parseSpecContent(apiName, apiType, content, filename);
+}
+
+// ---------------------------------------------------------------------------
+// ZIP extraction — prefer JSON, fall back to EDMX, then WSDL
+// ---------------------------------------------------------------------------
+function extractFromZip(buffer, apiName) {
+  let zip;
   try {
-    if (ct.includes("json") || raw.trimStart().startsWith("{")) {
-      return parseOpenApi(apiName, raw);
+    zip = new AdmZip(buffer);
+  } catch {
+    // Not a ZIP — treat the raw buffer as the spec directly
+    return { content: buffer.toString("utf-8"), filename: apiName };
+  }
+
+  const entries = zip.getEntries();
+  if (!entries.length) throw new Error("ZIP archive is empty.");
+
+  // Priority: .json > .edmx > .wsdl > first entry
+  const pick = (ext) => entries.find((e) => e.entryName.toLowerCase().endsWith(ext));
+  const chosen = pick(".json") || pick(".edmx") || pick(".wsdl") || entries[0];
+
+  return {
+    content: chosen.getData().toString("utf-8"),
+    filename: chosen.entryName,
+    allFiles: entries.map((e) => e.entryName),
+  };
+}
+
+function parseSpecContent(apiName, apiType, content, filename) {
+  const name = filename?.toLowerCase() || "";
+  try {
+    if (name.endsWith(".json") || content.trimStart().startsWith("{")) {
+      return { ...parseOpenApi(apiName, content), sourceFile: filename };
     }
-    if (ct.includes("xml") || raw.trimStart().startsWith("<")) {
-      if (raw.includes("edmx:Edmx") || raw.includes("<edmx:")) {
-        return parseEdmx(apiName, raw);
-      }
-      if (raw.includes("wsdl:definitions") || raw.includes(":definitions")) {
-        return parseWsdl(apiName, raw);
-      }
+    if (name.endsWith(".edmx") || content.includes("edmx:Edmx") || content.includes("<edmx:")) {
+      return { ...parseEdmx(apiName, content), sourceFile: filename };
+    }
+    if (name.endsWith(".wsdl") || content.includes("wsdl:definitions") || content.includes(":definitions")) {
+      return { ...parseWsdl(apiName, content), sourceFile: filename };
     }
   } catch (parseErr) {
     return {
       api: apiName,
       apiType,
-      warning: `Spec downloaded but could not be fully parsed: ${parseErr.message}`,
-      rawPreview: raw.slice(0, 1000),
+      sourceFile: filename,
+      warning: `Downloaded but could not fully parse: ${parseErr.message}`,
+      rawPreview: content.slice(0, 1000),
     };
   }
-
-  return { api: apiName, apiType, format: "unknown", rawPreview: raw.slice(0, 1000) };
+  return { api: apiName, apiType, sourceFile: filename, format: "unknown", rawPreview: content.slice(0, 1000) };
 }
 
 // ---------------------------------------------------------------------------
