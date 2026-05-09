@@ -23,23 +23,23 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Ensure gh CLI is installed
+        run: |
+          if ! command -v gh &>/dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y gh
+          fi
+
       - name: Resolve release version
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          REPO="${{ github.repository }}"
-          API="https://api.github.com/repos/$REPO"
-          AUTH="Authorization: Bearer $GH_TOKEN"
-
-          tag_exists() {
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-              -H "$AUTH" -H "Accept: application/vnd.github+json" \
-              "$API/git/ref/tags/v$1")
-            [ "$STATUS" = "200" ]
-          }
-
           VERSION=$(node -p "require('./package.json').version")
-          while tag_exists "$VERSION"; do
+
+          while gh release view "v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; do
             VERSION=$(node -p "
               const [maj, min, pat] = '$VERSION'.split('.').map(Number);
               \`\${maj}.\${min}.\${pat + 1}\`
@@ -50,27 +50,13 @@ jobs:
           if [ "$VERSION" != "$ORIGINAL" ]; then
             npm version "$VERSION" --no-git-tag-version
 
-            # Fetch current SHA of package.json (required by Contents API)
-            curl -s -H "$AUTH" -H "Accept: application/vnd.github+json" \
-              "$API/contents/package.json" > /tmp/pkg_meta.json
-
-            # Build the PUT payload via node to handle base64 + JSON safely
-            node -e "
-              const fs = require('fs');
-              const sha  = JSON.parse(fs.readFileSync('/tmp/pkg_meta.json','utf8')).sha;
-              const content = fs.readFileSync('package.json').toString('base64');
-              fs.writeFileSync('/tmp/pkg_payload.json', JSON.stringify({
-                message: 'chore: bump version to $VERSION [skip ci]',
-                content,
-                sha
-              }));
-            "
-
-            curl -s -X PUT \
-              -H "$AUTH" -H "Accept: application/vnd.github+json" \
-              -H "Content-Type: application/json" \
-              "$API/contents/package.json" \
-              --data-binary @/tmp/pkg_payload.json
+            PKG_CONTENT=$(base64 -w0 package.json)
+            PKG_SHA=$(gh api "repos/${{ github.repository }}/contents/package.json" --jq '.sha')
+            gh api "repos/${{ github.repository }}/contents/package.json" \
+              --method PUT \
+              --field message="chore: bump version to $VERSION [skip ci]" \
+              --field content="$PKG_CONTENT" \
+              --field sha="$PKG_SHA"
           fi
 
           echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
