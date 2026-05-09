@@ -2,8 +2,8 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -16,29 +16,49 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Read version from package.json
+        id: version
+        run: echo "value=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag already exists
+        id: tag_check
+        run: |
+          if git rev-parse "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install production dependencies
+        if: steps.tag_check.outputs.exists == 'false'
         run: npm ci --omit=dev
 
       - name: Build release archive
+        if: steps.tag_check.outputs.exists == 'false'
         run: |
           mkdir -p dist/sap-api-mcp
           cp index.js package.json package-lock.json dist/sap-api-mcp/
           cp -r node_modules dist/sap-api-mcp/
           tar -czf sap-api-mcp.tar.gz -C dist sap-api-mcp
 
-      - name: Create GitHub Release
+      - name: Create tag and GitHub Release
+        if: steps.tag_check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.value }}
           files: sap-api-mcp.tar.gz
           generate_release_notes: true
 
       - name: Publish to npm
+        if: steps.tag_check.outputs.exists == 'false'
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
