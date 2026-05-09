@@ -7,61 +7,47 @@ import {
   McpError,
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
-import { createHash, randomBytes } from "crypto";
-import { createServer } from "http";
 import { execSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const CLIENT_ID = "sb-hubXsuaa-public!b630346";
-const AUTH_BASE = "https://sappubliccatalog.authentication.eu10.hana.ondemand.com";
 const CATALOG_BASE = "https://api.sap.com/odata/1.0/catalog.svc";
 const SEARCH_BASE = "https://api.sap.com/api/1.0/searchservice";
-const SANDBOX_BASE = "https://sandbox.api.sap.com";
-const TOKEN_PATH = join(homedir(), ".sap-api-mcp", "token.json");
+const SAP_HUB_URL = "https://api.sap.com";
+const COOKIE_PATH = join(homedir(), ".sap-api-mcp", "cookies.json");
 const API_KEY = process.env.SAP_API_KEY || "";
 
 // ---------------------------------------------------------------------------
-// Token storage
+// Cookie storage
 // ---------------------------------------------------------------------------
-function loadToken() {
+function loadCookies() {
   try {
-    const raw = readFileSync(TOKEN_PATH, "utf-8");
-    const token = JSON.parse(raw);
-    if (token.expires_at && Date.now() < token.expires_at - 60_000) return token;
-    return null;
+    return JSON.parse(readFileSync(COOKIE_PATH, "utf-8"));
   } catch {
     return null;
   }
 }
 
-function saveToken(token) {
+function saveCookies(cookieString) {
   const dir = join(homedir(), ".sap-api-mcp");
   mkdirSync(dir, { recursive: true });
-  const expires_at = token.expires_in
-    ? Date.now() + token.expires_in * 1000
-    : Date.now() + 3600_000;
-  writeFileSync(TOKEN_PATH, JSON.stringify({ ...token, expires_at }, null, 2));
+  writeFileSync(COOKIE_PATH, JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2));
 }
 
-function getAuthHeader() {
-  const token = loadToken();
-  if (token?.access_token) return { Authorization: `Bearer ${token.access_token}` };
-  if (API_KEY) return { APIKey: API_KEY };
-  return {};
+function getAuthHeaders() {
+  const cookies = loadCookies();
+  const headers = {};
+  if (cookies?.cookieString) headers["Cookie"] = cookies.cookieString;
+  else if (API_KEY) headers["APIKey"] = API_KEY;
+  return headers;
 }
 
-// ---------------------------------------------------------------------------
-// PKCE helpers
-// ---------------------------------------------------------------------------
-function generatePKCE() {
-  const verifier = randomBytes(32).toString("base64url");
-  const challenge = createHash("sha256").update(verifier).digest("base64url");
-  return { verifier, challenge };
+function isLoggedIn() {
+  return existsSync(COOKIE_PATH) && !!loadCookies()?.cookieString;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,105 +64,62 @@ function openBrowser(url) {
 }
 
 // ---------------------------------------------------------------------------
-// OAuth PKCE login
+// Login: 2-step browser cookie flow
 // ---------------------------------------------------------------------------
-async function doLogin() {
-  const existing = loadToken();
-  if (existing) {
-    return { status: "already_logged_in", message: "Already logged in. Token is still valid." };
+async function doLogin({ cookies } = {}) {
+  // Step 2: cookies provided — save them and verify
+  if (cookies) {
+    saveCookies(cookies.trim());
+
+    // Quick verification: try a protected endpoint
+    const testUrl =
+      `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
+    try {
+      const resp = await fetch(testUrl, {
+        headers: { Accept: "*/*", Cookie: cookies.trim() },
+        redirect: "manual",
+      });
+      const ct = resp.headers.get("content-type") || "";
+      if (ct.includes("text/html") || resp.status === 302) {
+        // Cookies didn't work — delete and inform
+        writeFileSync(COOKIE_PATH, JSON.stringify({ cookieString: null }));
+        return {
+          status: "invalid",
+          message:
+            "The provided cookies don't grant access to SAP API Hub. " +
+            "Make sure you are logged in on api.sap.com before copying cookies, " +
+            "and that you copied all cookies for the api.sap.com domain.",
+        };
+      }
+    } catch {
+      // Network error during verification — save anyway, will fail later if wrong
+    }
+
+    return {
+      status: "success",
+      message:
+        "Cookies saved successfully. You can now use get_spec for all API types (OData, REST, SOAP). " +
+        `Saved at: ${COOKIE_PATH}`,
+    };
   }
 
-  const { verifier, challenge } = generatePKCE();
-  const state = randomBytes(8).toString("hex");
-
-  // Start local callback server on a random port
-  const { server, port } = await new Promise((resolve) => {
-    const s = createServer();
-    s.listen(0, "127.0.0.1", () => resolve({ server: s, port: s.address().port }));
-  });
-
-  const redirectUri = `http://127.0.0.1:${port}/callback`;
-  const authUrl =
-    `${AUTH_BASE}/oauth/authorize` +
-    `?response_type=code` +
-    `&client_id=${encodeURIComponent(CLIENT_ID)}` +
-    `&redirect_uri=${encodeURIComponent(redirectUri)}` +
-    `&code_challenge=${challenge}` +
-    `&code_challenge_method=S256` +
-    `&state=${state}`;
-
-  openBrowser(authUrl);
-
-  // Wait for the OAuth callback (90 second timeout)
-  const code = await new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      server.close();
-      reject(new Error("Login timed out after 90 seconds. Please try again."));
-    }, 90_000);
-
-    server.on("request", (req, res) => {
-      const url = new URL(req.url, `http://127.0.0.1:${port}`);
-      if (url.pathname !== "/callback") {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-
-      const returnedState = url.searchParams.get("state");
-      const code = url.searchParams.get("code");
-      const error = url.searchParams.get("error");
-
-      res.writeHead(200, { "Content-Type": "text/html" });
-      if (error || returnedState !== state) {
-        res.end(
-          `<html><body style="font-family:sans-serif;text-align:center;padding:60px">
-            <h2>&#10060; Login failed</h2>
-            <p>${error || "State mismatch"}</p>
-            <p>You can close this tab.</p>
-          </body></html>`
-        );
-        clearTimeout(timeout);
-        server.close();
-        reject(new Error(`OAuth error: ${error || "state mismatch"}`));
-        return;
-      }
-
-      res.end(
-        `<html><body style="font-family:sans-serif;text-align:center;padding:60px">
-          <h2>&#10003; Logged in successfully</h2>
-          <p>You can close this tab and return to your AI assistant.</p>
-        </body></html>`
-      );
-      clearTimeout(timeout);
-      server.close();
-      resolve(code);
-    });
-  });
-
-  // Exchange code for token
-  const tokenRes = await fetch(`${AUTH_BASE}/oauth/token`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      client_id: CLIENT_ID,
-      code_verifier: verifier,
-    }),
-  });
-
-  if (!tokenRes.ok) {
-    const err = await tokenRes.text();
-    throw new Error(`Token exchange failed: ${err}`);
-  }
-
-  const token = await tokenRes.json();
-  saveToken(token);
+  // Step 1: Open browser and return instructions
+  openBrowser(SAP_HUB_URL);
 
   return {
-    status: "success",
-    message: "Logged in successfully. Token saved — you won't need to log in again until it expires.",
+    status: "instructions",
+    message: "Browser opened to api.sap.com. Follow these steps to complete login:",
+    steps: [
+      "1. Log in with your SAP account in the browser that just opened.",
+      "2. After logging in, open DevTools: press F12 (or Cmd+Option+I on Mac).",
+      "3. Go to the 'Application' tab (Chrome) or 'Storage' tab (Firefox).",
+      "4. Click 'Cookies' → 'https://api.sap.com' in the left panel.",
+      "5. Click on any cookie row, then press Ctrl+A to select all cookies.",
+      "   Alternatively: go to the 'Network' tab, reload the page, click any request to api.sap.com,",
+      "   find the 'Cookie' header under Request Headers, and copy its full value.",
+      "6. Call login again with the cookies parameter: login({ cookies: '<paste here>' })",
+    ],
+    tip: "The cookie string looks like: 'name1=value1; name2=value2; ...'",
   };
 }
 
@@ -186,9 +129,10 @@ async function doLogin() {
 async function safeFetch(url, options = {}) {
   const resp = await fetch(url, options);
   const ct = resp.headers.get("content-type") || "";
-  if (ct.includes("text/html")) {
+  if (ct.includes("text/html") || resp.status === 302) {
     throw new Error(
-      "SAP returned a login page. Run the `login` tool first to authenticate."
+      "SAP returned a login page. Run the `login` tool first, follow the steps, " +
+      "then call `login` again with your browser cookies to authenticate."
     );
   }
   if (!resp.ok) {
@@ -220,7 +164,7 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   if (apiType) params.set("$filter", `(SubType:["${apiType.toUpperCase()}"])`);
 
   const data = await fetchJson(`${SEARCH_BASE}?${params}`, {
-    headers: { Accept: "application/json", ...getAuthHeader() },
+    headers: { Accept: "application/json", ...getAuthHeaders() },
   });
 
   const results = (data.hits?.hits || []).map((h) => {
@@ -257,7 +201,7 @@ async function listApis({ packageName, apiType, top = 50 }) {
   }
 
   const data = await fetchJson(url, {
-    headers: { Accept: "application/json", ...getAuthHeader() },
+    headers: { Accept: "application/json", ...getAuthHeaders() },
   });
 
   const results = (data.d?.results || []).map((r) => ({
@@ -282,7 +226,7 @@ async function getSpec({ apiName }) {
     `${CATALOG_BASE}/Artifacts(Name='${encodeURIComponent(apiName)}',Type='API')/$value`;
 
   const resp = await safeFetch(specUrl, {
-    headers: { Accept: "*/*", ...getAuthHeader() },
+    headers: { Accept: "*/*", ...getAuthHeaders() },
   });
 
   const ct = resp.headers.get("content-type") || "";
@@ -427,10 +371,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "login",
       description:
-        "Log in to SAP Business Accelerator Hub via OAuth. Opens the SAP login page in your " +
-        "browser automatically and captures the token. Required for downloading API specs (REST, SOAP). " +
-        "Token is saved locally and reused across sessions.",
-      inputSchema: { type: "object", properties: {} },
+        "Log in to SAP Business Accelerator Hub. Two-step process:\n" +
+        "Step 1 — call with no arguments: opens api.sap.com in your browser and returns instructions.\n" +
+        "Step 2 — call with `cookies` after logging in: paste the Cookie header value from browser DevTools.\n" +
+        "Required for get_spec on REST and SOAP APIs. Cookies are saved locally at ~/.sap-api-mcp/cookies.json.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          cookies: {
+            type: "string",
+            description:
+              "The full Cookie header string copied from browser DevTools after logging in to api.sap.com. " +
+              "Looks like: 'name1=value1; name2=value2; ...'",
+          },
+        },
+      },
     },
     {
       name: "search_apis",
@@ -514,7 +469,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case "login":        result = await doLogin(); break;
+      case "login":        result = await doLogin(args || {}); break;
       case "search_apis":  result = await searchApis(args); break;
       case "list_apis":    result = await listApis(args); break;
       case "get_spec":     result = await getSpec(args); break;
