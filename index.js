@@ -399,7 +399,7 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
     };
   }
 
-  const results = hits.map((h) => {
+  let results = hits.map((h) => {
     const s = h._source;
     return {
       displayName:          s.DisplayName,
@@ -416,6 +416,14 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
       url: `https://api.sap.com/api/${s.Name}/overview`,
     };
   });
+
+  // Client-side package filter as a safety net — the SAP search API does not reliably
+  // scope results to $parentTechnicalName when a searchTerm is also provided.
+  if (packageName) {
+    results = results.filter(
+      (r) => r.package?.toLowerCase() === packageName.toLowerCase()
+    );
+  }
 
   return { total: data.hits?.total || 0, returned: results.length, results };
 }
@@ -598,38 +606,70 @@ function parseOpenApi(apiName, raw, filter) {
   let endpoints = Object.entries(paths).flatMap(([path, methods]) =>
     Object.entries(methods)
       .filter(([m]) => HTTP_METHODS.has(m))
-      .map(([method, op]) => ({
-        method: method.toUpperCase(),
-        path,
-        summary: op.summary || op.operationId || null,
-        parameters: (op.parameters || []).map((p) => ({
-          name:        p.name,
-          in:          p.in,
-          required:    p.required || false,
-          type:        p.schema?.type || p.type || null,
-          enum:        p.schema?.enum || p.enum || null,
-          description: p.description || null,
-        })),
-        requestBody: op.requestBody
-          ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
-          : null,
-        responses: Object.entries(op.responses || {}).map(([code, r]) => ({
-          status:      code,
-          description: r.description || null,
-          schema:      summarizeSchema(
-            r.content?.["application/json"]?.schema || r.schema || null,
-            spec
-          ),
-        })),
-      }))
+      .map(([method, op]) => {
+        // Swagger 2.0 puts the body in parameters with in:"body"; OpenAPI 3.0 uses requestBody.
+        const bodyParam = (op.parameters || []).find((p) => p.in === "body");
+
+        // Collect raw $ref names (before resolution) so filter can match schema names.
+        const schemaRefs = new Set();
+        const collectRefs = (schema) => {
+          if (!schema) return;
+          if (schema.$ref) schemaRefs.add(schema.$ref.split("/").pop().toLowerCase());
+          if (schema.properties) Object.values(schema.properties).forEach(collectRefs);
+          if (schema.items) collectRefs(schema.items);
+          (schema.allOf || schema.anyOf || schema.oneOf || []).forEach(collectRefs);
+        };
+        Object.values(op.responses || {}).forEach((r) =>
+          collectRefs(r.content?.["application/json"]?.schema || r.schema)
+        );
+        if (op.requestBody) collectRefs(op.requestBody.content?.["application/json"]?.schema);
+        if (bodyParam?.schema) collectRefs(bodyParam.schema);
+
+        return {
+          method: method.toUpperCase(),
+          path,
+          summary: op.summary || op.operationId || null,
+          _schemaRefs: [...schemaRefs],
+          parameters: (op.parameters || [])
+            .filter((p) => p.in !== "body")
+            .map((p) => ({
+              name:        p.name,
+              in:          p.in,
+              required:    p.required || false,
+              type:        p.schema?.type || p.type || null,
+              enum:        p.schema?.enum || p.enum || null,
+              description: p.description || null,
+            })),
+          requestBody:
+            op.requestBody
+              ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
+              : bodyParam?.schema
+              ? summarizeSchema(bodyParam.schema, spec)
+              : null,
+          responses: Object.entries(op.responses || {}).map(([code, r]) => ({
+            status:      code,
+            description: r.description || null,
+            schema:      summarizeSchema(
+              r.content?.["application/json"]?.schema || r.schema || null,
+              spec
+            ),
+          })),
+        };
+      })
   );
 
   if (filter) {
     const f = filter.toLowerCase();
     endpoints = endpoints.filter(
-      (e) => e.path.toLowerCase().includes(f) || (e.summary && e.summary.toLowerCase().includes(f))
+      (e) =>
+        e.path.toLowerCase().includes(f) ||
+        (e.summary && e.summary.toLowerCase().includes(f)) ||
+        e._schemaRefs.some((r) => r.includes(f))
     );
   }
+
+  // Strip internal helper field before returning
+  endpoints.forEach((e) => delete e._schemaRefs);
 
   return {
     api:           apiName,
