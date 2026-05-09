@@ -19,7 +19,6 @@ const CATALOG_BASE = "https://api.sap.com/odata/1.0/catalog.svc";
 const SEARCH_BASE  = "https://api.sap.com/api/1.0/searchservice";
 const SAP_HUB_URL  = "https://api.sap.com";
 const COOKIE_PATH  = join(homedir(), ".sap-api-mcp", "cookies.json");
-const API_KEY      = process.env.SAP_API_KEY || "";
 
 // API used to verify session validity (OData spec download requires login)
 const SESSION_TEST_URL =
@@ -48,7 +47,6 @@ function saveCookies(cookieString) {
 function getAuthHeaders() {
   const cookies = loadCookies();
   if (cookies?.cookieString) return { Cookie: cookies.cookieString };
-  if (API_KEY) return { APIKey: API_KEY };
   return {};
 }
 
