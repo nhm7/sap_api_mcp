@@ -23,23 +23,42 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Bump patch version if tag already exists
+      - name: Ensure gh CLI is installed
+        run: |
+          if ! command -v gh &>/dev/null; then
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y gh
+          fi
+
+      - name: Resolve release version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          while git rev-parse "v$VERSION" >/dev/null 2>&1; do
+
+          while gh release view "v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; do
             VERSION=$(node -p "
               const [maj, min, pat] = '$VERSION'.split('.').map(Number);
               \`\${maj}.\${min}.\${pat + 1}\`
             ")
           done
-          if [ "$VERSION" != "$(node -p "require('./package.json').version")" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          ORIGINAL=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$ORIGINAL" ]; then
             npm version "$VERSION" --no-git-tag-version
-            git add package.json package-lock.json
-            git commit -m "chore: bump patch version to $VERSION [skip ci]"
-            git push origin main
+
+            PKG_CONTENT=$(base64 -w0 package.json)
+            PKG_SHA=$(gh api "repos/${{ github.repository }}/contents/package.json" --jq '.sha')
+            gh api "repos/${{ github.repository }}/contents/package.json" \
+              --method PUT \
+              --field message="chore: bump version to $VERSION [skip ci]" \
+              --field content="$PKG_CONTENT" \
+              --field sha="$PKG_SHA"
           fi
+
           echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install production dependencies
@@ -52,7 +71,7 @@ jobs:
           cp -r node_modules dist/sap-api-mcp/
           tar -czf sap-api-mcp.tar.gz -C dist sap-api-mcp
 
-      - name: Create tag and GitHub Release
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_VERSION }}
