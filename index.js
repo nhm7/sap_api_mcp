@@ -7,10 +7,12 @@ import {
   McpError,
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
-import { execSync } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "fs";
-import { homedir } from "os";
+import { execSync, spawn } from "child_process";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, mkdtempSync, rmSync, statSync } from "fs";
+import { createServer } from "net";
+import { homedir, tmpdir } from "os";
 import { join } from "path";
+import WebSocket from "ws";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -33,94 +35,197 @@ function loadCookies() {
 }
 
 function saveCookies(cookieString) {
-  const dir = join(homedir(), ".sap-api-mcp");
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(homedir(), ".sap-api-mcp"), { recursive: true });
   writeFileSync(COOKIE_PATH, JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2));
 }
 
 function getAuthHeaders() {
   const cookies = loadCookies();
-  const headers = {};
-  if (cookies?.cookieString) headers["Cookie"] = cookies.cookieString;
-  else if (API_KEY) headers["APIKey"] = API_KEY;
-  return headers;
-}
-
-function isLoggedIn() {
-  return existsSync(COOKIE_PATH) && !!loadCookies()?.cookieString;
+  if (cookies?.cookieString) return { Cookie: cookies.cookieString };
+  if (API_KEY) return { APIKey: API_KEY };
+  return {};
 }
 
 // ---------------------------------------------------------------------------
-// Cross-platform browser open
+// Browser detection (Chrome / Edge / Brave — anything Chromium-based)
 // ---------------------------------------------------------------------------
-function openBrowser(url) {
-  try {
-    if (process.platform === "darwin") execSync(`open "${url}"`);
-    else if (process.platform === "win32") execSync(`start "" "${url}"`);
-    else execSync(`xdg-open "${url}"`);
-  } catch {
-    // Silently ignore — URL is shown to user anyway
-  }
-}
+function findChromiumBrowser() {
+  const p = process.platform;
 
-// ---------------------------------------------------------------------------
-// Login: 2-step browser cookie flow
-// ---------------------------------------------------------------------------
-async function doLogin({ cookies } = {}) {
-  // Step 2: cookies provided — save them and verify
-  if (cookies) {
-    saveCookies(cookies.trim());
+  const candidates =
+    p === "darwin"
+      ? [
+          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+          "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+          "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+          "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+      : p === "win32"
+      ? [
+          process.env.LOCALAPPDATA + "\\Google\\Chrome\\Application\\chrome.exe",
+          process.env.PROGRAMFILES + "\\Google\\Chrome\\Application\\chrome.exe",
+          (process.env["PROGRAMFILES(X86)"] || "") + "\\Google\\Chrome\\Application\\chrome.exe",
+          process.env.LOCALAPPDATA + "\\Microsoft\\Edge\\Application\\msedge.exe",
+          process.env.PROGRAMFILES + "\\Microsoft\\Edge\\Application\\msedge.exe",
+        ]
+      : ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium", "microsoft-edge", "brave-browser"];
 
-    // Quick verification: try a protected endpoint
-    const testUrl =
-      `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
+  for (const exe of candidates.filter(Boolean)) {
     try {
-      const resp = await fetch(testUrl, {
-        headers: { Accept: "*/*", Cookie: cookies.trim() },
+      if (p === "linux") execSync(`which "${exe}"`, { stdio: "ignore" });
+      else statSync(exe);
+      return exe;
+    } catch {}
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Get a free TCP port
+// ---------------------------------------------------------------------------
+function getFreePort() {
+  return new Promise((resolve) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const port = s.address().port;
+      s.close(() => resolve(port));
+    });
+  });
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Login via Chrome DevTools Protocol (CDP)
+// ---------------------------------------------------------------------------
+async function doLogin() {
+  // Already have valid cookies?
+  const existing = loadCookies();
+  if (existing?.cookieString) {
+    const testUrl = `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
+    try {
+      const r = await fetch(testUrl, {
+        headers: { Accept: "*/*", Cookie: existing.cookieString },
         redirect: "manual",
       });
-      const ct = resp.headers.get("content-type") || "";
-      if (ct.includes("text/html") || resp.status === 302) {
-        // Cookies didn't work — delete and inform
-        writeFileSync(COOKIE_PATH, JSON.stringify({ cookieString: null }));
-        return {
-          status: "invalid",
-          message:
-            "The provided cookies don't grant access to SAP API Hub. " +
-            "Make sure you are logged in on api.sap.com before copying cookies, " +
-            "and that you copied all cookies for the api.sap.com domain.",
-        };
+      const ct = r.headers.get("content-type") || "";
+      if (!ct.includes("text/html") && r.status !== 302) {
+        return { status: "already_logged_in", message: "Already logged in. Session is still valid." };
       }
-    } catch {
-      // Network error during verification — save anyway, will fail later if wrong
+    } catch {}
+    // Session expired — fall through to re-login
+  }
+
+  const browserPath = findChromiumBrowser();
+  if (!browserPath) {
+    throw new Error(
+      "No Chromium-based browser found (Chrome, Edge, or Brave). " +
+      "Please install one and try again."
+    );
+  }
+
+  const debugPort = await getFreePort();
+  const profileDir = mkdtempSync(join(tmpdir(), "sap-mcp-"));
+  const PROTECTED_URL = `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
+
+  const proc = spawn(
+    browserPath,
+    [
+      `--remote-debugging-port=${debugPort}`,
+      `--user-data-dir=${profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--disable-sync",
+      "--disable-extensions",
+      "--window-size=1100,800",
+      SAP_HUB_URL,
+    ],
+    { stdio: "ignore" }
+  );
+
+  const cleanup = () => {
+    try { proc.kill(); } catch {}
+    try { rmSync(profileDir, { recursive: true, force: true }); } catch {}
+  };
+
+  try {
+    // Wait for browser to start and open the debugging port
+    let tabs = null;
+    for (let attempt = 0; attempt < 15; attempt++) {
+      await sleep(1000);
+      try {
+        const res = await fetch(`http://127.0.0.1:${debugPort}/json`);
+        tabs = await res.json();
+        if (tabs.length) break;
+      } catch {}
+    }
+    if (!tabs?.length) throw new Error("Browser started but debugger is unreachable. Please try again.");
+
+    const tab = tabs.find((t) => t.type === "page") || tabs[0];
+    const ws = new WebSocket(tab.webSocketDebuggerUrl);
+
+    await new Promise((resolve, reject) => {
+      ws.once("open", resolve);
+      ws.once("error", () => reject(new Error("WebSocket connection to browser failed.")));
+      setTimeout(() => reject(new Error("Browser connection timed out.")), 10_000);
+    });
+
+    let msgId = 1;
+    const cdp = (method, params = {}) =>
+      new Promise((resolve, reject) => {
+        const id = msgId++;
+        const onMsg = (data) => {
+          const msg = JSON.parse(data);
+          if (msg.id !== id) return;
+          ws.off("message", onMsg);
+          msg.error ? reject(new Error(msg.error.message)) : resolve(msg.result);
+        };
+        ws.on("message", onMsg);
+        ws.send(JSON.stringify({ id, method, params }));
+        setTimeout(() => {
+          ws.off("message", onMsg);
+          reject(new Error(`CDP timeout: ${method}`));
+        }, 10_000);
+      });
+
+    // Poll until the session cookies grant access to the protected endpoint
+    const deadline = Date.now() + 120_000;
+    let cookieString = null;
+
+    while (Date.now() < deadline) {
+      await sleep(3000);
+      try {
+        const { cookies } = await cdp("Network.getCookies", { urls: ["https://api.sap.com"] });
+        if (!cookies.length) continue;
+
+        const str = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+        const testResp = await fetch(PROTECTED_URL, {
+          headers: { Accept: "*/*", Cookie: str },
+          redirect: "manual",
+        });
+        const ct = testResp.headers.get("content-type") || "";
+        if (!ct.includes("text/html") && testResp.status !== 302 && testResp.status < 500) {
+          cookieString = str;
+          break;
+        }
+      } catch {}
     }
 
+    ws.close();
+    if (!cookieString) {
+      throw new Error("Login timed out after 2 minutes. Please try again and log in within that time.");
+    }
+
+    saveCookies(cookieString);
     return {
       status: "success",
       message:
-        "Cookies saved successfully. You can now use get_spec for all API types (OData, REST, SOAP). " +
-        `Saved at: ${COOKIE_PATH}`,
+        "Logged in successfully. Cookies saved — you can now use get_spec for all API types (OData, REST, SOAP). " +
+        `Session stored at: ${COOKIE_PATH}`,
     };
+  } finally {
+    cleanup();
   }
-
-  // Step 1: Open browser and return instructions
-  openBrowser(SAP_HUB_URL);
-
-  return {
-    status: "instructions",
-    message: "Browser opened to api.sap.com. Follow these steps to complete login:",
-    steps: [
-      "1. Log in with your SAP account in the browser that just opened.",
-      "2. After logging in, open DevTools: press F12 (or Cmd+Option+I on Mac).",
-      "3. Go to the 'Application' tab (Chrome) or 'Storage' tab (Firefox).",
-      "4. Click 'Cookies' → 'https://api.sap.com' in the left panel.",
-      "5. Click on any cookie row, then press Ctrl+A to select all cookies.",
-      "   Alternatively: go to the 'Network' tab, reload the page, click any request to api.sap.com,",
-      "   find the 'Cookie' header under Request Headers, and copy its full value.",
-      "6. Call login again with the cookies parameter: login({ cookies: '<paste here>' })",
-    ],
-    tip: "The cookie string looks like: 'name1=value1; name2=value2; ...'",
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -371,21 +476,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "login",
       description:
-        "Log in to SAP Business Accelerator Hub. Two-step process:\n" +
-        "Step 1 — call with no arguments: opens api.sap.com in your browser and returns instructions.\n" +
-        "Step 2 — call with `cookies` after logging in: paste the Cookie header value from browser DevTools.\n" +
-        "Required for get_spec on REST and SOAP APIs. Cookies are saved locally at ~/.sap-api-mcp/cookies.json.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          cookies: {
-            type: "string",
-            description:
-              "The full Cookie header string copied from browser DevTools after logging in to api.sap.com. " +
-              "Looks like: 'name1=value1; name2=value2; ...'",
-          },
-        },
-      },
+        "Log in to SAP Business Accelerator Hub. Opens a browser window on api.sap.com automatically " +
+        "(works on Mac, Linux, Windows). Log in normally — the session is captured automatically once " +
+        "the login is detected. Required for get_spec on REST and SOAP APIs. " +
+        "Cookies are saved at ~/.sap-api-mcp/cookies.json and reused across sessions.",
+      inputSchema: { type: "object", properties: {} },
     },
     {
       name: "search_apis",
@@ -469,7 +564,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case "login":        result = await doLogin(args || {}); break;
+      case "login":        result = await doLogin(); break;
       case "search_apis":  result = await searchApis(args); break;
       case "list_apis":    result = await listApis(args); break;
       case "get_spec":     result = await getSpec(args); break;
