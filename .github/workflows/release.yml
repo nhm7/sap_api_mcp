@@ -17,30 +17,35 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
 
-      - name: Read version from package.json
-        id: version
-        run: echo "value=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
-
-      - name: Check if tag already exists
-        id: tag_check
+      - name: Bump patch version if tag already exists
         run: |
-          if git rev-parse "${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exists=false" >> "$GITHUB_OUTPUT"
+          VERSION=$(node -p "require('./package.json').version")
+          while git rev-parse "v$VERSION" >/dev/null 2>&1; do
+            VERSION=$(node -p "
+              const [maj, min, pat] = '$VERSION'.split('.').map(Number);
+              \`\${maj}.\${min}.\${pat + 1}\`
+            ")
+          done
+          if [ "$VERSION" != "$(node -p "require('./package.json').version")" ]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            npm version "$VERSION" --no-git-tag-version
+            git add package.json package-lock.json
+            git commit -m "chore: bump patch version to $VERSION [skip ci]"
+            git push origin main
           fi
+          echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install production dependencies
-        if: steps.tag_check.outputs.exists == 'false'
         run: npm ci --omit=dev
 
       - name: Build release archive
-        if: steps.tag_check.outputs.exists == 'false'
         run: |
           mkdir -p dist/sap-api-mcp
           cp index.js package.json package-lock.json dist/sap-api-mcp/
@@ -48,9 +53,8 @@ jobs:
           tar -czf sap-api-mcp.tar.gz -C dist sap-api-mcp
 
       - name: Create tag and GitHub Release
-        if: steps.tag_check.outputs.exists == 'false'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.value }}
+          tag_name: ${{ env.RELEASE_VERSION }}
           files: sap-api-mcp.tar.gz
           generate_release_notes: true
