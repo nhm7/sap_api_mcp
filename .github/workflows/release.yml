@@ -27,10 +27,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          REPO="${{ github.repository }}"
+          API="https://api.github.com/repos/$REPO"
+          AUTH="Authorization: Bearer $GH_TOKEN"
 
-          # Bump patch until we find a tag that doesn't exist yet
-          while gh release view "v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; do
+          tag_exists() {
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+              -H "$AUTH" -H "Accept: application/vnd.github+json" \
+              "$API/git/ref/tags/v$1")
+            [ "$STATUS" = "200" ]
+          }
+
+          VERSION=$(node -p "require('./package.json').version")
+          while tag_exists "$VERSION"; do
             VERSION=$(node -p "
               const [maj, min, pat] = '$VERSION'.split('.').map(Number);
               \`\${maj}.\${min}.\${pat + 1}\`
@@ -39,17 +48,29 @@ jobs:
 
           ORIGINAL=$(node -p "require('./package.json').version")
           if [ "$VERSION" != "$ORIGINAL" ]; then
-            # Update package.json locally (used for the archive)
             npm version "$VERSION" --no-git-tag-version
 
-            # Commit package.json back to main via GitHub Contents API
-            PKG_CONTENT=$(base64 -w0 package.json)
-            PKG_SHA=$(gh api "repos/${{ github.repository }}/contents/package.json" --jq '.sha')
-            gh api "repos/${{ github.repository }}/contents/package.json" \
-              --method PUT \
-              --field message="chore: bump version to $VERSION [skip ci]" \
-              --field content="$PKG_CONTENT" \
-              --field sha="$PKG_SHA"
+            # Fetch current SHA of package.json (required by Contents API)
+            curl -s -H "$AUTH" -H "Accept: application/vnd.github+json" \
+              "$API/contents/package.json" > /tmp/pkg_meta.json
+
+            # Build the PUT payload via node to handle base64 + JSON safely
+            node -e "
+              const fs = require('fs');
+              const sha  = JSON.parse(fs.readFileSync('/tmp/pkg_meta.json','utf8')).sha;
+              const content = fs.readFileSync('package.json').toString('base64');
+              fs.writeFileSync('/tmp/pkg_payload.json', JSON.stringify({
+                message: 'chore: bump version to $VERSION [skip ci]',
+                content,
+                sha
+              }));
+            "
+
+            curl -s -X PUT \
+              -H "$AUTH" -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "$API/contents/package.json" \
+              --data-binary @/tmp/pkg_payload.json
           fi
 
           echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
