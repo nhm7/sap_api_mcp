@@ -14,32 +14,44 @@ jobs:
     runs-on: self-hosted
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: "22"
 
-      - name: Bump patch version if tag already exists
+      - name: Resolve release version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          while git rev-parse "v$VERSION" >/dev/null 2>&1; do
+
+          # Bump patch until we find a tag that doesn't exist yet
+          while gh release view "v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; do
             VERSION=$(node -p "
               const [maj, min, pat] = '$VERSION'.split('.').map(Number);
               \`\${maj}.\${min}.\${pat + 1}\`
             ")
           done
-          if [ "$VERSION" != "$(node -p "require('./package.json').version")" ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          ORIGINAL=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$ORIGINAL" ]; then
+            # Update package.json locally (used for the archive)
             npm version "$VERSION" --no-git-tag-version
-            git add package.json package-lock.json
-            git commit -m "chore: bump patch version to $VERSION [skip ci]"
-            git push origin main
+
+            # Commit package.json back to main via GitHub Contents API
+            PKG_CONTENT=$(base64 -w0 package.json)
+            PKG_SHA=$(gh api "repos/${{ github.repository }}/contents/package.json" --jq '.sha')
+            gh api "repos/${{ github.repository }}/contents/package.json" \
+              --method PUT \
+              --field message="chore: bump version to $VERSION [skip ci]" \
+              --field content="$PKG_CONTENT" \
+              --field sha="$PKG_SHA"
           fi
+
           echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
 
       - name: Install production dependencies
@@ -52,8 +64,8 @@ jobs:
           cp -r node_modules dist/sap-api-mcp/
           tar -czf sap-api-mcp.tar.gz -C dist sap-api-mcp
 
-      - name: Create tag and GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.RELEASE_VERSION }}
           files: sap-api-mcp.tar.gz
