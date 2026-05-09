@@ -1,0 +1,21 @@
+{
+  "name": "sap-api-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for SAP Business Accelerator Hub – browse API catalog and inspect schemas",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
