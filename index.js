@@ -14,9 +14,7 @@ import { homedir, tmpdir } from "os";
 import { join } from "path";
 import AdmZip from "adm-zip";
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+// #region Constants
 const CATALOG_BASE = "https://api.sap.com/odata/1.0/catalog.svc";
 const SEARCH_BASE  = "https://api.sap.com/api/1.0/searchservice";
 const SAP_HUB_URL  = "https://api.sap.com";
@@ -28,10 +26,9 @@ const SESSION_TEST_URL =
   `${CATALOG_BASE}/Artifacts(Name='API_BUSINESS_PARTNER',Type='API')/$value`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// #endregion
 
-// ---------------------------------------------------------------------------
-// Cookie storage
-// ---------------------------------------------------------------------------
+// #region Cookie storage
 function loadCookies() {
   try {
     return JSON.parse(readFileSync(COOKIE_PATH, "utf-8"));
@@ -71,9 +68,9 @@ async function isSessionValid(cookieString) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Browser detection — returns { path, name } or null
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Browser detection
 function findChromiumBrowser() {
   const p = process.platform;
 
@@ -112,9 +109,9 @@ function findChromiumBrowser() {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Free TCP port helper
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Free TCP port helper
 function getFreePort() {
   return new Promise((resolve) => {
     const s = createServer();
@@ -125,9 +122,9 @@ function getFreePort() {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Login via Chrome DevTools Protocol (CDP) — fully automated
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Login (CDP — fully automated)
 async function doLogin() {
   // Check if existing session is still valid
   const existing = loadCookies();
@@ -283,9 +280,9 @@ async function doLogin() {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Fetch helpers
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Fetch helpers
 async function safeFetch(url, options = {}) {
   let resp;
   try {
@@ -325,9 +322,9 @@ async function fetchJson(url, options = {}) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Tool: search_apis
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Tool: search_apis
 async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   top = Math.min(Math.max(1, top), 50);
 
@@ -379,9 +376,9 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   return { total: data.hits?.total || 0, returned: results.length, results };
 }
 
-// ---------------------------------------------------------------------------
-// Tool: list_apis
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Tool: list_apis
 async function listApis({ packageName, apiType, top = 50 }) {
   top = Math.min(Math.max(1, top), 100);
 
@@ -422,9 +419,9 @@ async function listApis({ packageName, apiType, top = 50 }) {
   return { package: packageName, total: results.length, results };
 }
 
-// ---------------------------------------------------------------------------
-// Tool: get_spec
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Tool: get_spec
 async function getSpec({ apiName }) {
   // Look up the API type first (no auth needed) so we can give better errors
   let apiType = null;
@@ -490,9 +487,9 @@ async function getSpec({ apiName }) {
   return parseSpecContent(apiName, apiType, content, filename);
 }
 
-// ---------------------------------------------------------------------------
-// ZIP extraction — prefer JSON, fall back to EDMX, then WSDL
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region ZIP extraction
 function extractFromZip(buffer, apiName) {
   let zip;
   try {
@@ -540,9 +537,9 @@ function parseSpecContent(apiName, apiType, content, filename) {
   return { api: apiName, apiType, sourceFile: filename, format: "unknown", rawPreview: content.slice(0, 1000) };
 }
 
-// ---------------------------------------------------------------------------
-// Spec parsers
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region Spec parsers
 function parseOpenApi(apiName, raw) {
   let spec;
   try {
@@ -666,9 +663,9 @@ function summarizeSchema(schema) {
   return { type: schema.type || null };
 }
 
-// ---------------------------------------------------------------------------
-// MCP Server
-// ---------------------------------------------------------------------------
+// #endregion
+
+// #region MCP Server
 const server = new Server(
   { name: "sap-api-mcp", version: "3.0.0" },
   { capabilities: { tools: {} } }
@@ -796,3 +793,4 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 const transport = new StdioServerTransport();
 await server.connect(transport);
 console.error("sap-api-mcp v3 running on stdio");
+// #endregion
