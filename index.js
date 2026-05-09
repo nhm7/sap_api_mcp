@@ -18,6 +18,7 @@ import AdmZip from "adm-zip";
 const CATALOG_BASE = "https://api.sap.com/odata/1.0/catalog.svc";
 const SEARCH_BASE  = "https://api.sap.com/api/1.0/searchservice";
 const SAP_HUB_URL  = "https://api.sap.com";
+const SAP_LOGIN_URL = "https://api.sap.com/loginservice";
 const COOKIE_PATH  = join(homedir(), ".sap-api-mcp", "cookies.json");
 
 // API used to verify session validity (OData spec download requires login)
@@ -159,7 +160,7 @@ async function doLogin() {
       "--disable-sync",
       "--disable-extensions",
       "--window-size=1100,800",
-      SAP_HUB_URL,
+      SAP_LOGIN_URL,
     ],
     { stdio: "ignore" }
   );
@@ -167,7 +168,7 @@ async function doLogin() {
   // Track whether the browser was closed by the user before login completed
   let browserExited = false;
   proc.on("exit", () => { browserExited = true; });
-  proc.on("error", (err) => { browserExited = true; });
+  proc.on("error", () => { browserExited = true; });
 
   const cleanup = () => {
     try { proc.kill(); } catch {}
