@@ -124,14 +124,16 @@ function getFreePort() {
 // #endregion
 
 // #region Login (CDP — fully automated)
-async function doLogin() {
+async function doLogin({ force = false } = {}) {
   // Check if existing session is still valid
-  const existing = loadCookies();
-  if (existing?.cookieString) {
-    if (await isSessionValid(existing.cookieString)) {
-      return { status: "already_logged_in", message: "Already logged in. Session is still valid." };
+  if (!force) {
+    const existing = loadCookies();
+    if (existing?.cookieString) {
+      if (await isSessionValid(existing.cookieString)) {
+        return { status: "already_logged_in", message: "Already logged in. Session is still valid." };
+      }
+      // Session expired — continue to re-login
     }
-    // Session expired — continue to re-login
   }
 
   // Find a Chromium-based browser
@@ -324,6 +326,48 @@ async function fetchJson(url, options = {}) {
 // #endregion
 
 // #region Tool: search_apis
+// #region Tool: search_packages
+async function searchPackages({ searchTerm, top = 20 }) {
+  top = Math.min(Math.max(1, top), 50);
+
+  const params = new URLSearchParams({
+    searchterm: searchTerm,
+    $top: String(top),
+    $skip: "0",
+    $type: '["Package"]',
+    $refinedBy: "true",
+    NoAgg: "true",
+  });
+
+  const data = await fetchJson(`${SEARCH_BASE}?${params}`, {
+    headers: { Accept: "application/json", ...getAuthHeaders() },
+  });
+
+  const hits = data.hits?.hits || [];
+  if (!hits.length && data.hits?.total === 0) {
+    return {
+      total: 0,
+      returned: 0,
+      results: [],
+      note: `No packages found matching "${searchTerm}".`,
+    };
+  }
+
+  const results = hits.map((h) => {
+    const s = h._source;
+    return {
+      displayName:   s.DisplayName,
+      technicalName: s.Name,
+      shortText:     s.ShortText,
+      url: `https://api.sap.com/package/${s.Name}/overview`,
+    };
+  });
+
+  return { total: data.hits?.total || 0, returned: results.length, results };
+}
+
+// #endregion
+
 async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   top = Math.min(Math.max(1, top), 50);
 
@@ -361,6 +405,7 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
       displayName:          s.DisplayName,
       technicalName:        s.Name,
       shortText:            s.ShortText,
+      description:          s.Description || null,
       version:              s.Version,
       apiType:              s.SubType,
       status:               s.APIState,
@@ -421,7 +466,7 @@ async function listApis({ packageName, apiType, top = 50 }) {
 // #endregion
 
 // #region Tool: get_spec
-async function getSpec({ apiName }) {
+async function getSpec({ apiName, filter }) {
   // Look up the API type first (no auth needed) so we can give better errors
   let apiType = null;
   try {
@@ -483,7 +528,7 @@ async function getSpec({ apiName }) {
 
   // Extract the relevant file from the ZIP
   const { content, filename } = extractFromZip(buffer, apiName);
-  return parseSpecContent(apiName, apiType, content, filename);
+  return parseSpecContent(apiName, apiType, content, filename, filter);
 }
 
 // #endregion
@@ -512,17 +557,17 @@ function extractFromZip(buffer, apiName) {
   };
 }
 
-function parseSpecContent(apiName, apiType, content, filename) {
+function parseSpecContent(apiName, apiType, content, filename, filter) {
   const name = filename?.toLowerCase() || "";
   try {
     if (name.endsWith(".json") || content.trimStart().startsWith("{")) {
-      return { ...parseOpenApi(apiName, content), sourceFile: filename };
+      return { ...parseOpenApi(apiName, content, filter), sourceFile: filename };
     }
     if (name.endsWith(".edmx") || content.includes("edmx:Edmx") || content.includes("<edmx:")) {
-      return { ...parseEdmx(apiName, content), sourceFile: filename };
+      return { ...parseEdmx(apiName, content, filter), sourceFile: filename };
     }
     if (name.endsWith(".wsdl") || content.includes("wsdl:definitions") || content.includes(":definitions")) {
-      return { ...parseWsdl(apiName, content), sourceFile: filename };
+      return { ...parseWsdl(apiName, content, filter), sourceFile: filename };
     }
   } catch (parseErr) {
     return {
@@ -539,7 +584,7 @@ function parseSpecContent(apiName, apiType, content, filename) {
 // #endregion
 
 // #region Spec parsers
-function parseOpenApi(apiName, raw) {
+function parseOpenApi(apiName, raw, filter) {
   let spec;
   try {
     spec = JSON.parse(raw);
@@ -550,7 +595,7 @@ function parseOpenApi(apiName, raw) {
   const paths = spec.paths || {};
   const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
-  const endpoints = Object.entries(paths).flatMap(([path, methods]) =>
+  let endpoints = Object.entries(paths).flatMap(([path, methods]) =>
     Object.entries(methods)
       .filter(([m]) => HTTP_METHODS.has(m))
       .map(([method, op]) => ({
@@ -562,20 +607,29 @@ function parseOpenApi(apiName, raw) {
           in:          p.in,
           required:    p.required || false,
           type:        p.schema?.type || p.type || null,
+          enum:        p.schema?.enum || p.enum || null,
           description: p.description || null,
         })),
         requestBody: op.requestBody
-          ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema)
+          ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
           : null,
         responses: Object.entries(op.responses || {}).map(([code, r]) => ({
           status:      code,
           description: r.description || null,
           schema:      summarizeSchema(
-            r.content?.["application/json"]?.schema || r.schema || null
+            r.content?.["application/json"]?.schema || r.schema || null,
+            spec
           ),
         })),
       }))
   );
+
+  if (filter) {
+    const f = filter.toLowerCase();
+    endpoints = endpoints.filter(
+      (e) => e.path.toLowerCase().includes(f) || (e.summary && e.summary.toLowerCase().includes(f))
+    );
+  }
 
   return {
     api:           apiName,
@@ -585,11 +639,12 @@ function parseOpenApi(apiName, raw) {
     description:   spec.info?.description  || null,
     endpointCount: endpoints.length,
     endpoints,
+    filterApplied: filter || null,
   };
 }
 
-function parseEdmx(apiName, xml) {
-  const entityTypes = [];
+function parseEdmx(apiName, xml, filter) {
+  let entityTypes = [];
   const etRegex = /<EntityType[^>]+Name="([^"]+)"[^>]*>([\s\S]*?)<\/EntityType>/g;
   let m;
 
@@ -614,15 +669,30 @@ function parseEdmx(apiName, xml) {
     entityTypes.push({ entityType: name, keyFields, properties });
   }
 
-  if (!entityTypes.length) {
-    throw new Error("Could not parse any EntityTypes from the EDMX document.");
+  if (filter) {
+    const f = filter.toLowerCase();
+    entityTypes = entityTypes.filter((et) => et.entityType.toLowerCase().includes(f));
   }
 
-  return { api: apiName, format: "OData EDMX", entityTypeCount: entityTypes.length, entityTypes };
+  if (!entityTypes.length) {
+    throw new Error(
+      filter
+        ? `No EntityTypes matching "${filter}" found in the EDMX document.`
+        : "Could not parse any EntityTypes from the EDMX document."
+    );
+  }
+
+  return {
+    api: apiName,
+    format: "OData EDMX",
+    entityTypeCount: entityTypes.length,
+    entityTypes,
+    filterApplied: filter || null,
+  };
 }
 
-function parseWsdl(apiName, xml) {
-  const operations = [
+function parseWsdl(apiName, xml, filter) {
+  let operations = [
     ...xml.matchAll(/<(?:wsdl:)?operation\s+name="([^"]+)"/g),
   ].map((m) => m[1]);
 
@@ -637,29 +707,69 @@ function parseWsdl(apiName, xml) {
     )].map((p) => ({ name: p[1], type: p[2] })),
   }));
 
-  if (!operations.length) {
-    throw new Error("Could not parse any operations from the WSDL document.");
+  if (filter) {
+    const f = filter.toLowerCase();
+    operations = operations.filter((op) => op.toLowerCase().includes(f));
   }
 
-  return { api: apiName, format: "SOAP WSDL", operationCount: operations.length, operations, messages };
+  if (!operations.length) {
+    throw new Error(
+      filter
+        ? `No operations matching "${filter}" found in the WSDL document.`
+        : "Could not parse any operations from the WSDL document."
+    );
+  }
+
+  return {
+    api: apiName,
+    format: "SOAP WSDL",
+    operationCount: operations.length,
+    operations,
+    messages,
+    filterApplied: filter || null,
+  };
 }
 
-function summarizeSchema(schema) {
+function summarizeSchema(schema, spec, seen = new Set()) {
   if (!schema) return null;
-  if (schema.$ref) return { $ref: schema.$ref };
-  if (schema.type === "array") return { type: "array", items: summarizeSchema(schema.items) };
-  if (schema.type === "object" || schema.properties) {
-    return {
-      type: "object",
-      properties: Object.fromEntries(
-        Object.entries(schema.properties || {}).map(([k, v]) => [
-          k,
-          { type: v.type || v.$ref || null, description: v.description || null },
-        ])
-      ),
-    };
+  if (schema.$ref) {
+    if (seen.has(schema.$ref)) return { $ref: schema.$ref, note: "Circular reference" };
+    const newSeen = new Set(seen);
+    newSeen.add(schema.$ref);
+    const resolved = resolveRef(schema.$ref, spec);
+    return summarizeSchema(resolved, spec, newSeen);
   }
-  return { type: schema.type || null };
+
+  const result = {
+    type: schema.type || null,
+    description: schema.description || null,
+    enum: schema.enum || null,
+  };
+
+  if (schema.type === "array") {
+    result.items = summarizeSchema(schema.items, spec, seen);
+  } else if (schema.type === "object" || schema.properties) {
+    result.type = "object";
+    result.properties = Object.fromEntries(
+      Object.entries(schema.properties || {}).map(([k, v]) => [
+        k,
+        summarizeSchema(v, spec, seen),
+      ])
+    );
+  }
+  return result;
+}
+
+function resolveRef(ref, spec) {
+  if (!ref || typeof ref !== "string" || !ref.startsWith("#/")) {
+    return { note: `External or invalid ref ${ref} not supported` };
+  }
+  const parts = ref.split("/").slice(1);
+  let current = spec;
+  for (const part of parts) {
+    current = current?.[part];
+  }
+  return current || { note: `Could not resolve ref ${ref}` };
 }
 
 // #endregion
@@ -681,7 +791,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         "The browser closes by itself when done. " +
         "Required for get_spec on REST, SOAP, and GraphQL APIs. " +
         "Session is saved at ~/.sap-api-mcp/cookies.json and reused until it expires.",
-      inputSchema: { type: "object", properties: {} },
+      inputSchema: {
+        type: "object",
+        properties: {
+          force: {
+            type: "boolean",
+            description: "Force a fresh login even if an existing session is still valid.",
+          },
+        },
+      },
+    },
+    {
+      name: "search_packages",
+      description:
+        "Search for product packages on SAP Business Accelerator Hub (api.sap.com). " +
+        "Returns matching packages with technical names, display names and descriptions. " +
+        "Useful for finding the correct packageName to use in list_apis or search_apis.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          searchTerm: {
+            type: "string",
+            description:
+              'Keyword to search for, e.g. "S/4HANA", "SuccessFactors", "Ariba". ' +
+              'Use "*" to list all packages.',
+          },
+          top: {
+            type: "number",
+            description: "Maximum number of results (default 20, max 50).",
+          },
+        },
+        required: ["searchTerm"],
+      },
     },
     {
       name: "search_apis",
@@ -763,6 +904,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               'Technical API name, e.g. "API_BUSINESS_PARTNER", "CE_SALES_ORDERS_0001". ' +
               "Use search_apis or list_apis to find the correct name.",
           },
+          filter: {
+            type: "string",
+            description:
+              'Optional filter to return only specific endpoints, entities, or operations. ' +
+              'e.g. "/sfcdetail", "SfcDetailResponse", "start". Helpful for large APIs.',
+          },
         },
         required: ["apiName"],
       },
@@ -775,10 +922,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     let result;
     switch (name) {
-      case "login":       result = await doLogin();         break;
-      case "search_apis": result = await searchApis(args);  break;
-      case "list_apis":   result = await listApis(args);    break;
-      case "get_spec":    result = await getSpec(args);     break;
+      case "login":           result = await doLogin(args);         break;
+      case "search_packages": result = await searchPackages(args);  break;
+      case "search_apis":     result = await searchApis(args);      break;
+      case "list_apis":       result = await listApis(args);        break;
+      case "get_spec":        result = await getSpec(args);         break;
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
     }
