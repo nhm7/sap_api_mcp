@@ -38,10 +38,12 @@ function loadCookies() {
 }
 
 function saveCookies(cookieString) {
-  mkdirSync(join(homedir(), ".sap-api-mcp"), { recursive: true });
+  // Use secure permissions (0o700 for dir, 0o600 for file) to prevent credential leakage
+  mkdirSync(join(homedir(), ".sap-api-mcp"), { recursive: true, mode: 0o700 });
   writeFileSync(
     COOKIE_PATH,
-    JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2)
+    JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2),
+    { mode: 0o600 }
   );
 }
 
