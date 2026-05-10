@@ -1,3 +1,0 @@
-## 2024-05-10 - OData EDMX Regex Compilation Bottleneck
-**Learning:** Dynamically instantiating `new RegExp(...)` inside a hot inner loop for parsing properties of XML `<EntityType>` blocks in `parseEdmx` causes significant performance degradation. The overhead of repeatedly compiling regexes for standard XML attributes (`Name`, `Type`, `Nullable`, `MaxLength`, `sap:label`) across many properties in a large API specification dramatically slows down the parsing process.
-**Action:** Always pre-compile static regular expressions outside of hot loops, especially when iterating over numerous tokens like XML elements/properties. A benchmark showed a ~4.5x speedup simply by lifting these regex instantiations out of the loop.
