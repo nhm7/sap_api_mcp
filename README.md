@@ -12,7 +12,7 @@ MCP server for the [SAP Business Accelerator Hub](https://api.sap.com) — searc
 >
 > This software is provided **"as is"** — see the [LICENSE](./LICENSE) for the full terms. The author(s) accept no liability for any damages, data loss, account suspension, or any other consequence arising from the use of this software. **Use at your own risk.**
 >
-> Users are solely responsible for ensuring their use of this tool complies with the [SAP Business Accelerator Hub Terms of Use](https://help.sap.com/docs/SAP_API_BUSINESS_HUB/e56a6c50d31541ea826021dc8e721a53/sap-business-accelerator-hub-terms-of-use) and any other applicable SAP terms, licences, and agreements.
+> Users are solely responsible for ensuring their use of this tool complies with the [SAP Business Accelerator Hub Terms of Use](https://help.sap.com/docs/business-accelerator-hub/sap-business-accelerator-hub/terms-of-use-for-sap-business-accelerator-hub) and any other applicable SAP terms, licences, and agreements.
 
 ---
 
