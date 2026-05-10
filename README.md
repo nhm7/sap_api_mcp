@@ -2,6 +2,20 @@
 
 MCP server for the [SAP Business Accelerator Hub](https://api.sap.com) — search APIs, list package contents, and inspect full specifications (OData EDMX, REST OpenAPI, SOAP WSDL) directly from Claude.
 
+---
+
+> ## Disclaimer
+>
+> **This project is an independent, community-developed tool and is not affiliated with, endorsed by, sponsored by, or in any way officially connected to SAP SE or any of its subsidiaries or affiliates.**
+>
+> The names "SAP", "SAP Business Accelerator Hub", and related product and service names are trademarks or registered trademarks of SAP SE. All rights in such trademarks are reserved by SAP SE. This project uses publicly available APIs provided by SAP Business Accelerator Hub solely to facilitate programmatic access for end users who already have authorised accounts.
+>
+> This software is provided **"as is"**, without warranty of any kind, express or implied. The author(s) accept no liability for any damages, data loss, account suspension, terms-of-service violations, or any other consequence arising from the use of this software. **Use at your own risk.**
+>
+> Users are solely responsible for ensuring their use of this tool complies with the [SAP Business Accelerator Hub Terms of Use](https://api.sap.com/terms-of-use) and any other applicable SAP terms, licences, and agreements.
+
+---
+
 ## Prerequisites
 
 | Requirement | Details |
