@@ -686,6 +686,14 @@ function parseOpenApi(apiName, raw, filter) {
 function parseEdmx(apiName, xml, filter) {
   let entityTypes = [];
   const etRegex = /<EntityType[^>]+Name="([^"]+)"[^>]*>([\s\S]*?)<\/EntityType>/g;
+
+  // Pre-compile property attribute regexes for performance (avoids instantiating inside the loop)
+  const nameRe     = /Name="([^"]*)"/;
+  const typeRe     = /Type="([^"]*)"/;
+  const nullableRe = /Nullable="([^"]*)"/;
+  const maxLenRe   = /MaxLength="([^"]*)"/;
+  const labelRe    = /sap:label="([^"]*)"/;
+
   let m;
 
   while ((m = etRegex.exec(xml)) !== null) {
@@ -696,13 +704,13 @@ function parseEdmx(apiName, xml, filter) {
 
     const properties = [...body.matchAll(/<Property\s([^/]*?)\/>/g)].map((p) => {
       const a   = p[1];
-      const get = (n) => a.match(new RegExp(`${n}="([^"]*)"`)) ?.[1] ?? null;
+      const maxLenMatch = a.match(maxLenRe);
       return {
-        name:      get("Name"),
-        type:      get("Type"),
-        nullable:  get("Nullable") !== "false",
-        maxLength: get("MaxLength") ? Number(get("MaxLength")) : undefined,
-        label:     get("sap:label")  || undefined,
+        name:      a.match(nameRe)?.[1] ?? null,
+        type:      a.match(typeRe)?.[1] ?? null,
+        nullable:  a.match(nullableRe)?.[1] !== "false",
+        maxLength: maxLenMatch ? Number(maxLenMatch[1]) : undefined,
+        label:     a.match(labelRe)?.[1] || undefined,
       };
     });
 
