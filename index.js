@@ -605,73 +605,75 @@ function parseOpenApi(apiName, raw, filter) {
   const paths = spec.paths || {};
   const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
-  let endpoints = Object.entries(paths).flatMap(([path, methods]) =>
-    Object.entries(methods)
-      .filter(([m]) => HTTP_METHODS.has(m))
-      .map(([method, op]) => {
-        // Swagger 2.0 puts the body in parameters with in:"body"; OpenAPI 3.0 uses requestBody.
-        const bodyParam = (op.parameters || []).find((p) => p.in === "body");
+  const filterLower = filter ? filter.toLowerCase() : null;
+  const endpoints = [];
 
-        // Collect raw $ref names (before resolution) so filter can match schema names.
-        const schemaRefs = new Set();
-        const collectRefs = (schema) => {
-          if (!schema) return;
-          if (schema.$ref) schemaRefs.add(schema.$ref.split("/").pop().toLowerCase());
-          if (schema.properties) Object.values(schema.properties).forEach(collectRefs);
-          if (schema.items) collectRefs(schema.items);
-          (schema.allOf || schema.anyOf || schema.oneOf || []).forEach(collectRefs);
-        };
-        Object.values(op.responses || {}).forEach((r) =>
-          collectRefs(r.content?.["application/json"]?.schema || r.schema)
-        );
-        if (op.requestBody) collectRefs(op.requestBody.content?.["application/json"]?.schema);
-        if (bodyParam?.schema) collectRefs(bodyParam.schema);
+  for (const [path, methods] of Object.entries(paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      if (!HTTP_METHODS.has(method)) continue;
 
-        return {
-          method: method.toUpperCase(),
-          path,
-          summary: op.summary || op.operationId || null,
-          _schemaRefs: [...schemaRefs],
-          parameters: (op.parameters || [])
-            .filter((p) => p.in !== "body")
-            .map((p) => ({
-              name:        p.name,
-              in:          p.in,
-              required:    p.required || false,
-              type:        p.schema?.type || p.type || null,
-              enum:        p.schema?.enum || p.enum || null,
-              description: p.description || null,
-            })),
-          requestBody:
-            op.requestBody
-              ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
-              : bodyParam?.schema
-              ? summarizeSchema(bodyParam.schema, spec)
-              : null,
-          responses: Object.entries(op.responses || {}).map(([code, r]) => ({
-            status:      code,
-            description: r.description || null,
-            schema:      summarizeSchema(
-              r.content?.["application/json"]?.schema || r.schema || null,
-              spec
-            ),
+      let matchesFilter = !filterLower;
+      const schemaRefs = new Set();
+
+      const collectRefs = (schema) => {
+        if (!schema) return;
+        if (schema.$ref) schemaRefs.add(schema.$ref.split("/").pop().toLowerCase());
+        if (schema.properties) Object.values(schema.properties).forEach(collectRefs);
+        if (schema.items) collectRefs(schema.items);
+        (schema.allOf || schema.anyOf || schema.oneOf || []).forEach(collectRefs);
+      };
+
+      const bodyParam = (op.parameters || []).find((p) => p.in === "body");
+
+      if (filterLower) {
+        if (path.toLowerCase().includes(filterLower) || (op.summary || op.operationId || "").toLowerCase().includes(filterLower)) {
+          matchesFilter = true;
+        } else {
+          Object.values(op.responses || {}).forEach((r) =>
+            collectRefs(r.content?.["application/json"]?.schema || r.schema)
+          );
+          if (op.requestBody) collectRefs(op.requestBody.content?.["application/json"]?.schema);
+          if (bodyParam?.schema) collectRefs(bodyParam.schema);
+
+          if ([...schemaRefs].some((r) => r.includes(filterLower))) {
+            matchesFilter = true;
+          }
+        }
+      }
+
+      if (!matchesFilter) continue;
+
+      endpoints.push({
+        method: method.toUpperCase(),
+        path,
+        summary: op.summary || op.operationId || null,
+        parameters: (op.parameters || [])
+          .filter((p) => p.in !== "body")
+          .map((p) => ({
+            name:        p.name,
+            in:          p.in,
+            required:    p.required || false,
+            type:        p.schema?.type || p.type || null,
+            enum:        p.schema?.enum || p.enum || null,
+            description: p.description || null,
           })),
-        };
-      })
-  );
-
-  if (filter) {
-    const f = filter.toLowerCase();
-    endpoints = endpoints.filter(
-      (e) =>
-        e.path.toLowerCase().includes(f) ||
-        (e.summary && e.summary.toLowerCase().includes(f)) ||
-        e._schemaRefs.some((r) => r.includes(f))
-    );
+        requestBody:
+          op.requestBody
+            ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
+            : bodyParam?.schema
+            ? summarizeSchema(bodyParam.schema, spec)
+            : null,
+        responses: Object.entries(op.responses || {}).map(([code, r]) => ({
+          status:      code,
+          description: r.description || null,
+          schema:      summarizeSchema(
+            r.content?.["application/json"]?.schema || r.schema || null,
+            spec
+          ),
+        })),
+      });
+    }
   }
-
-  // Strip internal helper field before returning
-  endpoints.forEach((e) => delete e._schemaRefs);
 
   return {
     api:           apiName,
@@ -696,10 +698,13 @@ function parseEdmx(apiName, xml, filter) {
   const maxLenRe   = /MaxLength="([^"]*)"/;
   const labelRe    = /sap:label="([^"]*)"/;
 
+  const filterLower = filter ? filter.toLowerCase() : null;
   let m;
 
   while ((m = etRegex.exec(xml)) !== null) {
     const name = m[1];
+    if (filterLower && !name.toLowerCase().includes(filterLower)) continue;
+
     const body = m[2];
 
     const keyFields = [...body.matchAll(/<PropertyRef\s+Name="([^"]+)"/g)].map((k) => k[1]);
@@ -717,11 +722,6 @@ function parseEdmx(apiName, xml, filter) {
     });
 
     entityTypes.push({ entityType: name, keyFields, properties });
-  }
-
-  if (filter) {
-    const f = filter.toLowerCase();
-    entityTypes = entityTypes.filter((et) => et.entityType.toLowerCase().includes(f));
   }
 
   if (!entityTypes.length) {
