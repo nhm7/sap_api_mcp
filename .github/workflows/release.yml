@@ -57,14 +57,16 @@ jobs:
           ORIGINAL=$(node -p "require('./package.json').version")
           if [ "$VERSION" != "$ORIGINAL" ]; then
             npm version "$VERSION" --no-git-tag-version
+            # Sync the lockfile so its root version matches package.json.
+            # Without this, npm regenerates the lockfile on every user install,
+            # causing a slow cold-start that can exceed Claude Code's MCP timeout.
+            npm install --package-lock-only --ignore-scripts
 
-            PKG_CONTENT=$(base64 -w0 package.json)
-            PKG_SHA=$(gh api "repos/${{ github.repository }}/contents/package.json" --jq '.sha')
-            gh api "repos/${{ github.repository }}/contents/package.json" \
-              --method PUT \
-              --field message="chore: bump version to $VERSION [skip ci]" \
-              --field content="$PKG_CONTENT" \
-              --field sha="$PKG_SHA"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git add package.json package-lock.json
+            git commit -m "chore: bump version to $VERSION [skip ci]"
+            git push
           fi
 
           echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
