@@ -825,8 +825,12 @@ function resolveRef(ref, spec) {
 // #endregion
 
 // #region MCP Server
+const { version: PKG_VERSION } = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf-8")
+);
+
 const server = new Server(
-  { name: "sap-api-mcp", version: "3.0.0" },
+  { name: "sap-api-mcp", version: PKG_VERSION },
   { capabilities: { tools: {} } }
 );
 
@@ -987,7 +991,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
+process.on("unhandledRejection", (reason) => {
+  console.error("sap-api-mcp: unhandled rejection:", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("sap-api-mcp: uncaught exception:", err);
+  process.exit(1);
+});
+
 const transport = new StdioServerTransport();
 await server.connect(transport);
-console.error("sap-api-mcp v3 running on stdio");
+console.error(`sap-api-mcp v${PKG_VERSION} running on stdio`);
 // #endregion
