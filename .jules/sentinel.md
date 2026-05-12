@@ -1,0 +1,4 @@
+## 2024-05-12 - [CRITICAL] `writeFileSync` Permission Enforcement Failure
+**Vulnerability:** Node.js `fs.writeFileSync(file, data, { mode: 0o600 })` only applies the `mode` when *creating* a new file. If the file already exists (e.g., with overly permissive `0o644` permissions), `writeFileSync` modifies the contents but *retains* the existing, insecure permissions. This can lead to persistent credential leakage even after attempting to secure the file.
+**Learning:** We assumed passing `{ mode: 0o600 }` to `writeFileSync` would always ensure the file has those permissions. However, it fails to fix existing insecure files.
+**Prevention:** Always use `fs.chmodSync(file, 0o600)` *after* `writeFileSync` when dealing with sensitive files (like session cookies or keys) to guarantee the permissions are correctly restricted regardless of prior state.
