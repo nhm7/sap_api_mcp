@@ -1,0 +1,4 @@
+## 2024-05-15 - [Node.js File Permissions]
+**Vulnerability:** When updating existing files using `fs.writeFileSync` in Node.js, the `mode` parameter only applies if the file is being newly created. It does NOT update permissions on an existing file, meaning sensitive files could retain loose permissions if previously set insecurely.
+**Learning:** The `saveCookies` function correctly set `mode: 0o600` in `writeFileSync`, but this did not enforce permissions on subsequent updates of the cookie file.
+**Prevention:** Always follow `writeFileSync` with `fs.chmodSync(path, mode)` when updating sensitive files to guarantee secure permissions are actively enforced.
