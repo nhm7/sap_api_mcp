@@ -1,6 +1,6 @@
 {
   "name": "sap-api-mcp",
-  "version": "3.1.9",
+  "version": "3.1.10",
   "description": "MCP server for SAP Business Accelerator Hub – browse API catalog and inspect schemas",
   "type": "module",
   "main": "index.js",
