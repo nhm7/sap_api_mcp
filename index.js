@@ -8,7 +8,7 @@ import {
   ErrorCode,
 } from "@modelcontextprotocol/sdk/types.js";
 import { execSync, spawn } from "child_process";
-import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync } from "fs";
+import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync, statSync, chmodSync } from "fs";
 import { createServer } from "net";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
@@ -45,6 +45,8 @@ function saveCookies(cookieString) {
     JSON.stringify({ cookieString, savedAt: new Date().toISOString() }, null, 2),
     { mode: 0o600 }
   );
+  // Ensure the file is 0o600 even if it was previously created with broader permissions
+  chmodSync(COOKIE_PATH, 0o600);
 }
 
 function getAuthHeaders() {
