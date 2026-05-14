@@ -607,6 +607,8 @@ function parseOpenApi(apiName, raw, filter) {
   const paths = spec.paths || {};
   const HTTP_METHODS = new Set(["get", "post", "put", "patch", "delete", "head", "options"]);
 
+  const sharedCache = new Map();
+
   let endpoints = Object.entries(paths).flatMap(([path, methods]) =>
     Object.entries(methods)
       .filter(([m]) => HTTP_METHODS.has(m))
@@ -646,16 +648,18 @@ function parseOpenApi(apiName, raw, filter) {
             })),
           requestBody:
             op.requestBody
-              ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec)
+              ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec, new Set(), sharedCache)
               : bodyParam?.schema
-              ? summarizeSchema(bodyParam.schema, spec)
+              ? summarizeSchema(bodyParam.schema, spec, new Set(), sharedCache)
               : null,
           responses: Object.entries(op.responses || {}).map(([code, r]) => ({
             status:      code,
             description: r.description || null,
             schema:      summarizeSchema(
               r.content?.["application/json"]?.schema || r.schema || null,
-              spec
+              spec,
+              new Set(),
+              sharedCache
             ),
           })),
         };
@@ -782,14 +786,17 @@ function parseWsdl(apiName, xml, filter) {
   };
 }
 
-function summarizeSchema(schema, spec, seen = new Set()) {
+function summarizeSchema(schema, spec, seen = new Set(), cache = new Map()) {
   if (!schema) return null;
   if (schema.$ref) {
     if (seen.has(schema.$ref)) return { $ref: schema.$ref, note: "Circular reference" };
+    if (cache.has(schema.$ref)) return cache.get(schema.$ref);
     const newSeen = new Set(seen);
     newSeen.add(schema.$ref);
     const resolved = resolveRef(schema.$ref, spec);
-    return summarizeSchema(resolved, spec, newSeen);
+    const result = summarizeSchema(resolved, spec, newSeen, cache);
+    cache.set(schema.$ref, result);
+    return result;
   }
 
   const result = {
@@ -799,13 +806,13 @@ function summarizeSchema(schema, spec, seen = new Set()) {
   };
 
   if (schema.type === "array") {
-    result.items = summarizeSchema(schema.items, spec, seen);
+    result.items = summarizeSchema(schema.items, spec, seen, cache);
   } else if (schema.type === "object" || schema.properties) {
     result.type = "object";
     result.properties = Object.fromEntries(
       Object.entries(schema.properties || {}).map(([k, v]) => [
         k,
-        summarizeSchema(v, spec, seen),
+        summarizeSchema(v, spec, seen, cache),
       ])
     );
   }
