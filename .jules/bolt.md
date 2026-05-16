@@ -1,0 +1,2 @@
+- Use a `Map` cache during deep schema traversals inside OpenAPI parsers to memoize resolved $refs, preventing O(N*M) explosions.
+- Before caching, scan objects to ensure they do not contain path-specific "Circular reference" objects, which would poison the cache for other endpoints.
