@@ -40,13 +40,6 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Update latest tag
-        if: steps.release.outputs.release_created
-        run: |
-          git fetch --force origin "refs/tags/${{ steps.release.outputs.tag_name }}:refs/tags/${{ steps.release.outputs.tag_name }}"
-          git tag --force latest "${{ steps.release.outputs.tag_name }}"
-          git push --force origin refs/tags/latest
-
       - name: Install production dependencies
         if: steps.release.outputs.release_created
         run: npm ci --omit=dev
