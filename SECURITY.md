@@ -16,8 +16,6 @@ Please reproduce security issues against the latest GitHub Release before report
 
 Please do not report security vulnerabilities through public GitHub issues, pull requests, or discussions.
 
-Report vulnerabilities privately at:
-
-<https://github.com/nhm7/sap_api_mcp/security/advisories/new>
+Report vulnerabilities privately through the [nhm7/sap_api_mcp security advisory form](https://github.com/nhm7/sap_api_mcp/security/advisories/new).
 
 We will review reports for the supported latest GitHub Release and coordinate remediation through the GitHub Security Advisory before public disclosure.
