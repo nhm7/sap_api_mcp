@@ -27,6 +27,7 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.app-token.outputs.token }}
+          # Keep package.json/package-lock.json as the version source of truth.
           release-type: node
 
       - uses: actions/checkout@v6
