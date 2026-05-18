@@ -32,7 +32,7 @@ MCP server for the [SAP Business Accelerator Hub](https://api.sap.com) — searc
 Run once in your terminal to register the server at user scope:
 
 ```bash
-claude mcp add --scope user sap-api-mcp -- npx -y github:nhm7/sap_api_mcp
+claude mcp add --scope user sap-api-mcp -- npx -y github:nhm7/sap_api_mcp#latest
 ```
 
 That's it. Claude Code picks it up immediately — no restart needed.
@@ -49,7 +49,7 @@ Add to your config file:
   "mcpServers": {
     "sap-api-mcp": {
       "command": "npx",
-      "args": ["-y", "github:nhm7/sap_api_mcp"]
+      "args": ["-y", "github:nhm7/sap_api_mcp#latest"]
     }
   }
 }
