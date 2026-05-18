@@ -7,10 +7,11 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
-  release:
-    name: Build & publish release
+  release-please:
+    name: Release Please
     runs-on: ubuntu-latest
 
     steps:
@@ -18,72 +19,41 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.APP_ID }}
+          client-id: ${{ vars.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - uses: actions/checkout@v6
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v5
         with:
-          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          release-type: node
+
+      - uses: actions/checkout@v6
+        if: steps.release.outputs.release_created
+        with:
+          ref: main
           token: ${{ steps.app-token.outputs.token }}
 
       - uses: actions/setup-node@v6
+        if: steps.release.outputs.release_created
         with:
           node-version: "22"
 
-      - name: Ensure gh CLI is installed
-        run: |
-          if ! command -v gh &>/dev/null; then
-            GH_VERSION=$(curl -s https://api.github.com/repos/cli/cli/releases/latest \
-              | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>console.log(JSON.parse(d).tag_name.slice(1)))")
-            ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-            curl -sL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${ARCH}.tar.gz" \
-              | tar xz -C "$RUNNER_TOOL_CACHE"
-            echo "$RUNNER_TOOL_CACHE/gh_${GH_VERSION}_linux_${ARCH}/bin" >> "$GITHUB_PATH"
-          fi
-
-      - name: Resolve release version
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-
-          while gh release view "v$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; do
-            VERSION=$(node -p "
-              const [maj, min, pat] = '$VERSION'.split('.').map(Number);
-              \`\${maj}.\${min}.\${pat + 1}\`
-            ")
-          done
-
-          ORIGINAL=$(node -p "require('./package.json').version")
-          if [ "$VERSION" != "$ORIGINAL" ]; then
-            npm version "$VERSION" --no-git-tag-version
-            # Sync the lockfile so its root version matches package.json.
-            # Without this, npm regenerates the lockfile on every user install,
-            # causing a slow cold-start that can exceed Claude Code's MCP timeout.
-            npm install --package-lock-only --ignore-scripts
-
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git config user.name "github-actions[bot]"
-            git add package.json package-lock.json
-            git commit -m "chore: bump version to $VERSION [skip ci]"
-            git push
-          fi
-
-          echo "RELEASE_VERSION=v$VERSION" >> "$GITHUB_ENV"
-
       - name: Install production dependencies
+        if: steps.release.outputs.release_created
         run: npm ci --omit=dev
 
       - name: Build release archive
+        if: steps.release.outputs.release_created
         run: |
           mkdir -p dist/sap-api-mcp
           cp index.js package.json package-lock.json dist/sap-api-mcp/
           cp -r node_modules dist/sap-api-mcp/
           tar -czf sap-api-mcp.tar.gz -C dist sap-api-mcp
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ env.RELEASE_VERSION }}
-          files: sap-api-mcp.tar.gz
-          generate_release_notes: true
+      - name: Upload release archive
+        if: steps.release.outputs.release_created
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: gh release upload "${{ steps.release.outputs.tag_name }}" sap-api-mcp.tar.gz --clobber --repo "${{ github.repository }}"
