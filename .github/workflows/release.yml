@@ -27,7 +27,6 @@ jobs:
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.app-token.outputs.token }}
-          # Keep package.json/package-lock.json as the version source of truth.
           release-type: node
 
       - uses: actions/checkout@v6
@@ -55,6 +54,9 @@ jobs:
 
       - name: Upload release archive
         if: steps.release.outputs.release_created
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: gh release upload "${{ steps.release.outputs.tag_name }}" sap-api-mcp.tar.gz --clobber --repo "${{ github.repository }}"
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.release.outputs.tag_name }}
+          files: sap-api-mcp.tar.gz
+          fail_on_unmatched_files: true
+          token: ${{ steps.app-token.outputs.token }}
