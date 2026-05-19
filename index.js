@@ -447,6 +447,36 @@ async function searchPackages({ searchTerm, top = 20, skip = 0 }) {
 async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   top = Math.min(Math.max(1, top), 50);
 
+  if (packageName) {
+    const f = searchTerm === "*" ? null : searchTerm.toLowerCase();
+    const results = [];
+    let skip = 0;
+
+    while (results.length < top) {
+      const page = await fetchPackageArtifacts({ packageName, apiType, top: 100, skip });
+      if (!page.length) break;
+      skip += page.length;
+      for (const r of page) {
+        const haystack = [r.technicalName, r.displayName, r.description, r.apiType]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (f && !haystack.includes(f)) continue;
+        results.push({
+          ...r,
+          package: packageName,
+          packageDisplayName: null,
+          communicationScenario: null,
+          businessObject: null,
+        });
+        if (results.length >= top) break;
+      }
+      if (page.length < 100 || skip >= 2500) break;
+    }
+
+    return { total: results.length, returned: results.length, results };
+  }
+
   const params = new URLSearchParams({
     searchterm: searchTerm,
     $top: String(top),
@@ -493,24 +523,13 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
     };
   });
 
-  // Client-side package filter as a safety net — the SAP search API does not reliably
-  // scope results to $parentTechnicalName when a searchTerm is also provided.
-  if (packageName) {
-    results = results.filter(
-      (r) => r.package?.toLowerCase() === packageName.toLowerCase()
-    );
-  }
-
   return { total: data.hits?.total || 0, returned: results.length, results };
 }
 
 // #endregion
 
 // #region Tool: list_apis
-async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
-  top = Math.min(Math.max(1, top), 100);
-  skip = Math.max(0, skip);
-
+async function fetchPackageArtifacts({ packageName, apiType, top, skip }) {
   let url =
     `${CATALOG_BASE}/ContentEntities.ContentPackages('${encodeURIComponent(packageName)}')/Artifacts` +
     `?$format=json&$top=${top}&$skip=${skip}` +
@@ -523,7 +542,7 @@ async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
     headers: { Accept: "application/json", ...getAuthHeaders() },
   });
 
-  const results = (data.d?.results || []).map((r) => ({
+  return (data.d?.results || []).map((r) => ({
     technicalName: r.Name,
     displayName:   r.DisplayName,
     apiType:       r.SubType,
@@ -532,6 +551,13 @@ async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
     version:       r.Version,
     url: `https://api.sap.com/api/${r.Name}/overview`,
   }));
+}
+
+async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
+  top = Math.min(Math.max(1, top), 100);
+  skip = Math.max(0, skip);
+
+  const results = await fetchPackageArtifacts({ packageName, apiType, top, skip });
 
   if (!results.length) {
     return {
