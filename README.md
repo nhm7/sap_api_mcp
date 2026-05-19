@@ -88,6 +88,7 @@ Search for product packages on SAP Business Accelerator Hub. Useful for finding 
 |---|---|---|
 | `searchTerm` *(required)* | string | Keyword, e.g. `"S/4HANA"`, `"SuccessFactors"`. Use `"*"` to list all packages. |
 | `top` | number | Max results (default 20, max 50). |
+| `skip` | number | Number of matching packages to skip for pagination. |
 
 ### `search_apis`
 Keyword search across the entire catalog. Results are scoped to the specified package when `packageName` is provided. No login required.
@@ -107,6 +108,7 @@ All APIs within a specific product package. No login required.
 | `packageName` *(required)* | string | Package technical name, e.g. `"SAPS4HANACloud"`. |
 | `apiType` | enum | Same values as above. |
 | `top` | number | Max results (default 50, max 100). |
+| `skip` | number | Number of APIs to skip for pagination. Use `nextSkip` while `hasMore` is `true`. |
 
 ### `get_spec`
 Downloads and parses the full spec for any API.
@@ -115,13 +117,16 @@ Downloads and parses the full spec for any API.
 |---|---|---|
 | `apiName` *(required)* | string | Technical API name, e.g. `"API_BUSINESS_PARTNER"`. Use `search_apis` or `list_apis` to find it. |
 | `filter` | string | Return only endpoints/entities/operations whose path, summary, or referenced schema name matches. e.g. `"/sfcdetail"`, `"SfcDetailResponse"`, `"start"`. |
+| `detail` | enum | `compact` *(default)* returns concise endpoint/entity/operation summaries. `full` returns expanded schemas/properties/messages. |
+| `sourceFile` | string | ZIP entry to parse when an archive contains multiple spec files. Use `availableFiles` from a previous response. |
 
 Returns:
-- **OData** → entity types, key fields, all properties with SAP labels and types
-- **REST** → all endpoints, path/query parameters, fully resolved request/response schemas (OpenAPI 3.0 and Swagger 2.0)
-- **SOAP** → operations, message parts and element types (WSDL)
+- **OData compact** → entity types, key fields and property counts
+- **REST compact** → endpoints, path/query parameters and request/response schema references
+- **SOAP compact** → operations
+- **`detail: "full"`** → expanded OData properties, REST schemas, or SOAP message parts
 
-> **Schema resolution**: all `$ref` references are resolved inline — including nested objects, arrays, and enums. Swagger 2.0 `in: body` parameters are resolved the same way as OpenAPI 3.0 `requestBody`.
+> **Schema resolution**: with `detail: "full"`, all `$ref` references are resolved inline — including nested objects, arrays, and enums. Swagger 2.0 `in: body` parameters are resolved the same way as OpenAPI 3.0 `requestBody`.
 
 > **Filtering by schema name**: `filter` matches against response and request schema names referenced by each endpoint (e.g. `filter: "SfcDetailResponse"` returns every endpoint that uses that schema), not just the path string.
 
