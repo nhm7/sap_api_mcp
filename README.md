@@ -110,6 +110,8 @@ All APIs within a specific product package. No login required.
 | `top` | number | Max results (default 50, max 100). |
 | `skip` | number | Number of APIs to skip for pagination. Use `nextSkip` while `hasMore` is `true`. |
 
+Returns `returned`, `hasMore`, and `nextSkip` for paging. A collection-wide `total` is not returned because the catalog endpoint does not expose a reliable count.
+
 ### `get_spec`
 Downloads and parses the full spec for any API.
 
@@ -122,13 +124,15 @@ Downloads and parses the full spec for any API.
 
 Returns:
 - **OData compact** → entity types, key fields and property counts
-- **REST compact** → endpoints, path/query parameters and request/response schema references
+- **REST compact** → endpoints, compact parameters (`name`, `type`, `required`) and request/response schema references
 - **SOAP compact** → operations
 - **`detail: "full"`** → expanded OData properties, REST schemas, or SOAP message parts
 
 > **Schema resolution**: with `detail: "full"`, all `$ref` references are resolved inline — including nested objects, arrays, and enums. Swagger 2.0 `in: body` parameters are resolved the same way as OpenAPI 3.0 `requestBody`.
 
 > **Filtering by schema name**: `filter` matches against response and request schema names referenced by each endpoint (e.g. `filter: "SfcDetailResponse"` returns every endpoint that uses that schema), not just the path string.
+
+> **EDMX filtering**: when `sourceFile` points to an `.edmx` file, `filter` matches EntityType names.
 
 ---
 

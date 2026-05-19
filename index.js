@@ -412,7 +412,6 @@ async function searchPackages({ searchTerm, top = 20, skip = 0 }) {
         returned: matches.length,
         top,
         skip,
-        scanned: rawSkip,
         hasMore: matches.length === top,
         nextSkip: matches.length === top ? skip + top : null,
         results: matches.map(fromCatalogPackage),
@@ -449,6 +448,7 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
 
   if (packageName) {
     const f = searchTerm === "*" ? null : searchTerm.toLowerCase();
+    const packageDisplayName = await fetchPackageDisplayName(packageName);
     const results = [];
     let skip = 0;
 
@@ -465,7 +465,7 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
         results.push({
           ...r,
           package: packageName,
-          packageDisplayName: null,
+          packageDisplayName,
           communicationScenario: null,
           businessObject: null,
         });
@@ -529,6 +529,20 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
 // #endregion
 
 // #region Tool: list_apis
+async function fetchPackageDisplayName(packageName) {
+  try {
+    const url =
+      `${CATALOG_BASE}/ContentPackages('${encodeURIComponent(packageName)}')` +
+      "?$format=json&$select=DisplayName";
+    const data = await fetchJson(url, {
+      headers: { Accept: "application/json", ...getAuthHeaders() },
+    });
+    return data.d?.DisplayName || null;
+  } catch {
+    return null;
+  }
+}
+
 async function fetchPackageArtifacts({ packageName, apiType, top, skip }) {
   let url =
     `${CATALOG_BASE}/ContentEntities.ContentPackages('${encodeURIComponent(packageName)}')/Artifacts` +
@@ -562,7 +576,11 @@ async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
   if (!results.length) {
     return {
       package: packageName,
-      total: 0,
+      returned: 0,
+      top,
+      skip,
+      hasMore: false,
+      nextSkip: null,
       results: [],
       note: apiType
         ? `No ${apiType} APIs found in package "${packageName}".`
@@ -573,7 +591,6 @@ async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
 
   return {
     package: packageName,
-    total: results.length,
     returned: results.length,
     top,
     skip,
@@ -740,7 +757,10 @@ function parseOpenApi(apiName, raw, filter, detail = "compact") {
       .filter(([m]) => HTTP_METHODS.has(m))
       .map(([method, op]) => {
         // Swagger 2.0 puts the body in parameters with in:"body"; OpenAPI 3.0 uses requestBody.
-        const bodyParam = (op.parameters || []).find((p) => p.in === "body");
+        const opParams = (op.parameters || [])
+          .map((p) => resolveParameter(p, spec))
+          .filter(Boolean);
+        const bodyParam = opParams.find((p) => p.in === "body");
 
         // Collect raw $ref names (before resolution) so filter can match schema names.
         const collectRefs = (schema, refs = new Set()) => {
@@ -769,16 +789,9 @@ function parseOpenApi(apiName, raw, filter, detail = "compact") {
           path,
           summary: op.summary || op.operationId || null,
           _schemaRefs: [...new Set([...requestSchemaRefs, ...responses.flatMap((r) => r.schemaRefs)])],
-          parameters: (op.parameters || [])
-            .filter((p) => p.in !== "body")
-            .map((p) => ({
-              name:        p.name,
-              in:          p.in,
-              required:    p.required || false,
-              type:        p.schema?.type || p.type || null,
-              enum:        p.schema?.enum || p.enum || null,
-              description: p.description || null,
-            })),
+          parameters: opParams
+            .filter((p) => p.in !== "body" && p.name && p.in)
+            .map((p) => summarizeParameter(p, detail)),
         };
         if (detail === "full") {
           endpoint.requestBody = requestSchema ? summarizeSchema(requestSchema, spec, undefined, sharedCache) : null;
@@ -922,6 +935,25 @@ function parseWsdl(apiName, xml, filter, detail = "compact") {
   };
 }
 
+function resolveParameter(param, spec) {
+  if (!param?.$ref) return param;
+  return resolveRef(param.$ref, spec);
+}
+
+function summarizeParameter(param, detail = "compact") {
+  const result = {
+    name:     param.name,
+    type:     param.schema?.type || param.type || null,
+    required: param.required || false,
+  };
+  if (detail === "full") {
+    result.in = param.in;
+    result.enum = param.schema?.enum || param.enum || null;
+    result.description = param.description || null;
+  }
+  return result;
+}
+
 function summarizeSchema(schema, spec, seen = new Set(), cache = new Map()) {
   if (!schema) return null;
   if (schema.$ref) {
@@ -959,7 +991,10 @@ function resolveRef(ref, spec) {
   if (!ref || typeof ref !== "string" || !ref.startsWith("#/")) {
     return { note: `External or invalid ref ${ref} not supported` };
   }
-  const parts = ref.split("/").slice(1);
+  const parts = ref.split("/").slice(1).map((part) => {
+    const pointerPart = part.replace(/~1/g, "/").replace(/~0/g, "~");
+    try { return decodeURIComponent(pointerPart); } catch { return pointerPart; }
+  });
   let current = spec;
   for (const part of parts) {
     current = current?.[part];
@@ -1065,6 +1100,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "list_apis",
       description:
         "List all APIs in a specific SAP product package. " +
+        "Returns returned/hasMore/nextSkip for pagination; no collection-wide total is provided. " +
         'Use the package technicalName from search results, e.g. "SAPS4HANACloud". ' +
         "No login required.",
       inputSchema: {
@@ -1115,7 +1151,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description:
               'Optional filter to return only specific endpoints, entities, or operations. ' +
-              'e.g. "/sfcdetail", "SfcDetailResponse", "start". Helpful for large APIs.',
+              'e.g. "/sfcdetail", "SfcDetailResponse", "start". ' +
+              "For EDMX source files, matches EntityType names. Helpful for large APIs.",
           },
           detail: {
             type: "string",
