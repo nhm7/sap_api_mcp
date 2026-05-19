@@ -331,13 +331,44 @@ async function fetchJson(url, options = {}) {
 
 // #region Tool: search_apis
 // #region Tool: search_packages
-async function searchPackages({ searchTerm, top = 20 }) {
+async function searchPackages({ searchTerm, top = 20, skip = 0 }) {
   top = Math.min(Math.max(1, top), 50);
+  skip = Math.max(0, skip);
+
+  const fromCatalogPackage = (p) => ({
+    displayName:   p.DisplayName,
+    technicalName: p.TechnicalName,
+    shortText:     p.ShortText,
+    url: `https://api.sap.com/package/${p.TechnicalName}/overview`,
+  });
+
+  const fetchPackagePage = async (pageSkip, pageTop) => {
+    const url =
+      `${CATALOG_BASE}/ContentPackages?$format=json&$top=${pageTop}&$skip=${pageSkip}` +
+      "&$select=TechnicalName,DisplayName,ShortText,Description,Products,Keywords";
+    const data = await fetchJson(url, {
+      headers: { Accept: "application/json", ...getAuthHeaders() },
+    });
+    return data.d?.results || [];
+  };
+
+  if (searchTerm === "*") {
+    const page = await fetchPackagePage(skip, top);
+    return {
+      total: page.length,
+      returned: page.length,
+      top,
+      skip,
+      hasMore: page.length === top,
+      nextSkip: page.length === top ? skip + top : null,
+      results: page.map(fromCatalogPackage),
+    };
+  }
 
   const params = new URLSearchParams({
     searchterm: searchTerm,
     $top: String(top),
-    $skip: "0",
+    $skip: String(skip),
     $type: '["Package"]',
     $refinedBy: "true",
     NoAgg: "true",
@@ -349,9 +380,50 @@ async function searchPackages({ searchTerm, top = 20 }) {
 
   const hits = data.hits?.hits || [];
   if (!hits.length && data.hits?.total === 0) {
+    const f = searchTerm.toLowerCase();
+    const matches = [];
+    let seenMatches = 0;
+    let rawSkip = 0;
+
+    while (matches.length < top) {
+      const page = await fetchPackagePage(rawSkip, 100);
+      if (!page.length) break;
+      rawSkip += page.length;
+      for (const p of page) {
+        const haystack = [
+          p.TechnicalName,
+          p.DisplayName,
+          p.ShortText,
+          p.Description,
+          p.Products,
+          p.Keywords,
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (!haystack.includes(f)) continue;
+        if (seenMatches++ < skip) continue;
+        matches.push(p);
+        if (matches.length >= top) break;
+      }
+      if (page.length < 100 || rawSkip >= 2500) break;
+    }
+
+    if (matches.length) {
+      return {
+        total: matches.length,
+        returned: matches.length,
+        top,
+        skip,
+        scanned: rawSkip,
+        hasMore: matches.length === top,
+        nextSkip: matches.length === top ? skip + top : null,
+        results: matches.map(fromCatalogPackage),
+      };
+    }
+
     return {
       total: 0,
       returned: 0,
+      top,
+      skip,
       results: [],
       note: `No packages found matching "${searchTerm}".`,
     };
@@ -374,6 +446,36 @@ async function searchPackages({ searchTerm, top = 20 }) {
 
 async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
   top = Math.min(Math.max(1, top), 50);
+
+  if (packageName) {
+    const f = searchTerm === "*" ? null : searchTerm.toLowerCase();
+    const results = [];
+    let skip = 0;
+
+    while (results.length < top) {
+      const page = await fetchPackageArtifacts({ packageName, apiType, top: 100, skip });
+      if (!page.length) break;
+      skip += page.length;
+      for (const r of page) {
+        const haystack = [r.technicalName, r.displayName, r.description, r.apiType]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        if (f && !haystack.includes(f)) continue;
+        results.push({
+          ...r,
+          package: packageName,
+          packageDisplayName: null,
+          communicationScenario: null,
+          businessObject: null,
+        });
+        if (results.length >= top) break;
+      }
+      if (page.length < 100 || skip >= 2500) break;
+    }
+
+    return { total: results.length, returned: results.length, results };
+  }
 
   const params = new URLSearchParams({
     searchterm: searchTerm,
@@ -421,26 +523,16 @@ async function searchApis({ searchTerm, packageName, apiType, top = 20 }) {
     };
   });
 
-  // Client-side package filter as a safety net — the SAP search API does not reliably
-  // scope results to $parentTechnicalName when a searchTerm is also provided.
-  if (packageName) {
-    results = results.filter(
-      (r) => r.package?.toLowerCase() === packageName.toLowerCase()
-    );
-  }
-
   return { total: data.hits?.total || 0, returned: results.length, results };
 }
 
 // #endregion
 
 // #region Tool: list_apis
-async function listApis({ packageName, apiType, top = 50 }) {
-  top = Math.min(Math.max(1, top), 100);
-
+async function fetchPackageArtifacts({ packageName, apiType, top, skip }) {
   let url =
     `${CATALOG_BASE}/ContentEntities.ContentPackages('${encodeURIComponent(packageName)}')/Artifacts` +
-    `?$format=json&$top=${top}&$skip=0` +
+    `?$format=json&$top=${top}&$skip=${skip}` +
     `&$select=Name,DisplayName,SubType,State,Description,Version`;
   if (apiType) {
     url += `&$filter=SubType%20eq%20'${encodeURIComponent(apiType.toUpperCase())}'`;
@@ -450,7 +542,7 @@ async function listApis({ packageName, apiType, top = 50 }) {
     headers: { Accept: "application/json", ...getAuthHeaders() },
   });
 
-  const results = (data.d?.results || []).map((r) => ({
+  return (data.d?.results || []).map((r) => ({
     technicalName: r.Name,
     displayName:   r.DisplayName,
     apiType:       r.SubType,
@@ -459,6 +551,13 @@ async function listApis({ packageName, apiType, top = 50 }) {
     version:       r.Version,
     url: `https://api.sap.com/api/${r.Name}/overview`,
   }));
+}
+
+async function listApis({ packageName, apiType, top = 50, skip = 0 }) {
+  top = Math.min(Math.max(1, top), 100);
+  skip = Math.max(0, skip);
+
+  const results = await fetchPackageArtifacts({ packageName, apiType, top, skip });
 
   if (!results.length) {
     return {
@@ -472,13 +571,24 @@ async function listApis({ packageName, apiType, top = 50 }) {
     };
   }
 
-  return { package: packageName, total: results.length, results };
+  return {
+    package: packageName,
+    total: results.length,
+    returned: results.length,
+    top,
+    skip,
+    hasMore: results.length === top,
+    nextSkip: results.length === top ? skip + top : null,
+    results,
+  };
 }
 
 // #endregion
 
 // #region Tool: get_spec
-async function getSpec({ apiName, filter }) {
+async function getSpec({ apiName, filter, detail = "compact", sourceFile }) {
+  detail = detail === "full" ? "full" : "compact";
+
   // Look up the API type first (no auth needed) so we can give better errors
   let apiType = null;
   try {
@@ -539,14 +649,14 @@ async function getSpec({ apiName, filter }) {
   }
 
   // Extract the relevant file from the ZIP
-  const { content, filename } = extractFromZip(buffer, apiName);
-  return parseSpecContent(apiName, apiType, content, filename, filter);
+  const { content, filename, allFiles } = extractFromZip(buffer, apiName, sourceFile);
+  return parseSpecContent(apiName, apiType, content, filename, { filter, detail, allFiles });
 }
 
 // #endregion
 
 // #region ZIP extraction
-function extractFromZip(buffer, apiName) {
+function extractFromZip(buffer, apiName, sourceFile) {
   let zip;
   try {
     zip = new AdmZip(buffer);
@@ -558,45 +668,62 @@ function extractFromZip(buffer, apiName) {
   const entries = zip.getEntries();
   if (!entries.length) throw new Error("ZIP archive is empty.");
 
-  // Priority: .json > .edmx > .wsdl > first entry
-  const pick = (ext) => entries.find((e) => e.entryName.toLowerCase().endsWith(ext));
-  const chosen = pick(".json") || pick(".edmx") || pick(".wsdl") || entries[0];
+  const allFiles = entries.map((e) => e.entryName);
+  if (sourceFile) {
+    const chosen = entries.find((e) => e.entryName === sourceFile);
+    if (!chosen) throw new Error(`Source file "${sourceFile}" not found. Available files: ${allFiles.join(", ")}`);
+    return { content: chosen.getData().toString("utf-8"), filename: chosen.entryName, allFiles };
+  }
+
+  const priority = [".json", ".edmx", ".wsdl"];
+  const supported = entries.filter((e) =>
+    priority.some((ext) => e.entryName.toLowerCase().endsWith(ext))
+  );
+  const apiKey = apiName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const apiMatches = supported.filter((e) =>
+    e.entryName.toLowerCase().replace(/[^a-z0-9]/g, "").includes(apiKey)
+  );
+  const candidates = apiMatches.length ? apiMatches : supported;
+  const chosen =
+    priority.map((ext) => candidates.find((e) => e.entryName.toLowerCase().endsWith(ext))).find(Boolean) ||
+    entries[0];
 
   return {
     content: chosen.getData().toString("utf-8"),
     filename: chosen.entryName,
-    allFiles: entries.map((e) => e.entryName),
+    allFiles,
   };
 }
 
-function parseSpecContent(apiName, apiType, content, filename, filter) {
+function parseSpecContent(apiName, apiType, content, filename, { filter, detail, allFiles } = {}) {
   const name = filename?.toLowerCase() || "";
   try {
     if (name.endsWith(".json") || content.trimStart().startsWith("{")) {
-      return { ...parseOpenApi(apiName, content, filter), sourceFile: filename };
+      return { ...parseOpenApi(apiName, content, filter, detail), sourceFile: filename, availableFiles: allFiles };
     }
     if (name.endsWith(".edmx") || content.includes("edmx:Edmx") || content.includes("<edmx:")) {
-      return { ...parseEdmx(apiName, content, filter), sourceFile: filename };
+      return { ...parseEdmx(apiName, content, filter, detail), sourceFile: filename, availableFiles: allFiles };
     }
     if (name.endsWith(".wsdl") || content.includes("wsdl:definitions") || content.includes(":definitions")) {
-      return { ...parseWsdl(apiName, content, filter), sourceFile: filename };
+      return { ...parseWsdl(apiName, content, filter, detail), sourceFile: filename, availableFiles: allFiles };
     }
   } catch (parseErr) {
     return {
       api: apiName,
       apiType,
       sourceFile: filename,
+      availableFiles: allFiles,
       warning: `Downloaded but could not fully parse: ${parseErr.message}`,
       rawPreview: content.slice(0, 1000),
     };
   }
-  return { api: apiName, apiType, sourceFile: filename, format: "unknown", rawPreview: content.slice(0, 1000) };
+  return { api: apiName, apiType, sourceFile: filename, availableFiles: allFiles, format: "unknown", rawPreview: content.slice(0, 1000) };
 }
 
 // #endregion
 
 // #region Spec parsers
-function parseOpenApi(apiName, raw, filter) {
+function parseOpenApi(apiName, raw, filter, detail = "compact") {
   let spec;
   try {
     spec = JSON.parse(raw);
@@ -616,25 +743,32 @@ function parseOpenApi(apiName, raw, filter) {
         const bodyParam = (op.parameters || []).find((p) => p.in === "body");
 
         // Collect raw $ref names (before resolution) so filter can match schema names.
-        const schemaRefs = new Set();
-        const collectRefs = (schema) => {
-          if (!schema) return;
-          if (schema.$ref) schemaRefs.add(schema.$ref.split("/").pop().toLowerCase());
-          if (schema.properties) Object.values(schema.properties).forEach(collectRefs);
-          if (schema.items) collectRefs(schema.items);
-          (schema.allOf || schema.anyOf || schema.oneOf || []).forEach(collectRefs);
+        const collectRefs = (schema, refs = new Set()) => {
+          if (!schema) return refs;
+          if (schema.$ref) refs.add(schema.$ref.split("/").pop());
+          if (schema.properties) Object.values(schema.properties).forEach((s) => collectRefs(s, refs));
+          if (schema.items) collectRefs(schema.items, refs);
+          (schema.allOf || schema.anyOf || schema.oneOf || []).forEach((s) => collectRefs(s, refs));
+          return refs;
         };
-        Object.values(op.responses || {}).forEach((r) =>
-          collectRefs(r.content?.["application/json"]?.schema || r.schema)
-        );
-        if (op.requestBody) collectRefs(op.requestBody.content?.["application/json"]?.schema);
-        if (bodyParam?.schema) collectRefs(bodyParam.schema);
 
-        return {
+        const requestSchema = op.requestBody?.content?.["application/json"]?.schema || bodyParam?.schema;
+        const requestSchemaRefs = [...collectRefs(requestSchema)];
+        const responses = Object.entries(op.responses || {}).map(([code, r]) => {
+          const schema = r.content?.["application/json"]?.schema || r.schema || null;
+          return {
+            status:      code,
+            description: r.description || null,
+            schemaRefs:  [...collectRefs(schema)],
+            schema:      detail === "full" ? summarizeSchema(schema, spec, undefined, sharedCache) : undefined,
+          };
+        });
+
+        const endpoint = {
           method: method.toUpperCase(),
           path,
           summary: op.summary || op.operationId || null,
-          _schemaRefs: [...schemaRefs],
+          _schemaRefs: [...new Set([...requestSchemaRefs, ...responses.flatMap((r) => r.schemaRefs)])],
           parameters: (op.parameters || [])
             .filter((p) => p.in !== "body")
             .map((p) => ({
@@ -645,23 +779,15 @@ function parseOpenApi(apiName, raw, filter) {
               enum:        p.schema?.enum || p.enum || null,
               description: p.description || null,
             })),
-          requestBody:
-            op.requestBody
-              ? summarizeSchema(op.requestBody.content?.["application/json"]?.schema, spec, undefined, sharedCache)
-              : bodyParam?.schema
-              ? summarizeSchema(bodyParam.schema, spec, undefined, sharedCache)
-              : null,
-          responses: Object.entries(op.responses || {}).map(([code, r]) => ({
-            status:      code,
-            description: r.description || null,
-            schema:      summarizeSchema(
-              r.content?.["application/json"]?.schema || r.schema || null,
-              spec,
-              undefined,
-              sharedCache
-            ),
-          })),
         };
+        if (detail === "full") {
+          endpoint.requestBody = requestSchema ? summarizeSchema(requestSchema, spec, undefined, sharedCache) : null;
+          endpoint.responses = responses.map(({ status, description, schema }) => ({ status, description, schema }));
+        } else {
+          endpoint.requestSchemaRefs = requestSchemaRefs;
+          endpoint.responses = responses.map(({ status, description, schemaRefs }) => ({ status, description, schemaRefs }));
+        }
+        return endpoint;
       })
   );
 
@@ -671,7 +797,7 @@ function parseOpenApi(apiName, raw, filter) {
       (e) =>
         e.path.toLowerCase().includes(f) ||
         (e.summary && e.summary.toLowerCase().includes(f)) ||
-        e._schemaRefs.some((r) => r.includes(f))
+        e._schemaRefs.some((r) => r.toLowerCase().includes(f))
     );
   }
 
@@ -685,12 +811,13 @@ function parseOpenApi(apiName, raw, filter) {
     title:         spec.info?.title        || null,
     description:   spec.info?.description  || null,
     endpointCount: endpoints.length,
+    detail,
     endpoints,
     filterApplied: filter || null,
   };
 }
 
-function parseEdmx(apiName, xml, filter) {
+function parseEdmx(apiName, xml, filter, detail = "compact") {
   let entityTypes = [];
   const etRegex = /<EntityType[^>]+Name="([^"]+)"[^>]*>([\s\S]*?)<\/EntityType>/g;
 
@@ -737,16 +864,25 @@ function parseEdmx(apiName, xml, filter) {
     );
   }
 
+  if (detail !== "full") {
+    entityTypes = entityTypes.map((et) => ({
+      entityType: et.entityType,
+      keyFields: et.keyFields,
+      propertyCount: et.properties.length,
+    }));
+  }
+
   return {
     api: apiName,
     format: "OData EDMX",
     entityTypeCount: entityTypes.length,
+    detail,
     entityTypes,
     filterApplied: filter || null,
   };
 }
 
-function parseWsdl(apiName, xml, filter) {
+function parseWsdl(apiName, xml, filter, detail = "compact") {
   let operations = [
     ...xml.matchAll(/<(?:wsdl:)?operation\s+name="([^"]+)"/g),
   ].map((m) => m[1]);
@@ -779,8 +915,9 @@ function parseWsdl(apiName, xml, filter) {
     api: apiName,
     format: "SOAP WSDL",
     operationCount: operations.length,
+    detail,
     operations,
-    messages,
+    ...(detail === "full" ? { messages } : {}),
     filterApplied: filter || null,
   };
 }
@@ -882,6 +1019,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Maximum number of results (default 20, max 50).",
           },
+          skip: {
+            type: "number",
+            description: "Number of matching packages to skip for pagination (default 0).",
+          },
         },
         required: ["searchTerm"],
       },
@@ -944,6 +1085,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "number",
             description: "Maximum number of results (default 50, max 100).",
           },
+          skip: {
+            type: "number",
+            description: "Number of APIs to skip for pagination (default 0). Use nextSkip when hasMore is true.",
+          },
         },
         required: ["packageName"],
       },
@@ -952,10 +1097,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "get_spec",
       description:
         "Download and parse the full specification for any SAP API:\n" +
-        "• OData V2/V4 — entity types, key fields, all properties with types and labels\n" +
-        "• REST        — all endpoints, path/query parameters, request/response schemas\n" +
-        "• SOAP        — operations, message parts and element types\n" +
-        "OData APIs work with SAP_API_KEY env var or after login. " +
+        "• OData V2/V4 — entity types, key fields, and properties in full detail\n" +
+        "• REST        — endpoints, path/query parameters, and schemas in full detail\n" +
+        "• SOAP        — operations, and message parts in full detail\n" +
+        "Compact detail is returned by default to avoid oversized responses. " +
         "REST, SOAP, and GraphQL require login.",
       inputSchema: {
         type: "object",
@@ -971,6 +1116,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               'Optional filter to return only specific endpoints, entities, or operations. ' +
               'e.g. "/sfcdetail", "SfcDetailResponse", "start". Helpful for large APIs.',
+          },
+          detail: {
+            type: "string",
+            enum: ["compact", "full"],
+            description:
+              'Response detail level. "compact" (default) returns endpoints/entities with schema refs or property counts; ' +
+              '"full" returns expanded schemas/properties/messages.',
+          },
+          sourceFile: {
+            type: "string",
+            description:
+              "Optional ZIP entry name to parse when the downloaded archive contains multiple spec files. " +
+              "Use availableFiles from a previous response to choose one.",
           },
         },
         required: ["apiName"],
