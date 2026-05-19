@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/nhm7/sap_api_mcp/compare/v3.1.13...v3.2.0) (2026-05-19)
+
+
+### Features
+
+* compact spec responses and paginate API lists ([#40](https://github.com/nhm7/sap_api_mcp/issues/40)) ([462fcbf](https://github.com/nhm7/sap_api_mcp/commit/462fcbfdf51aa78302c73b76bb074570bf7a1e4d))
+
 ## [3.1.13](https://github.com/nhm7/sap_api_mcp/compare/v3.1.12...v3.1.13) (2026-05-18)
 
 
