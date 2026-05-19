@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.1](https://github.com/nhm7/sap_api_mcp/compare/v3.2.0...v3.2.1) (2026-05-19)
+
+
+### Bug Fixes
+
+* address API pagination and spec parsing feedback ([#42](https://github.com/nhm7/sap_api_mcp/issues/42)) ([e627107](https://github.com/nhm7/sap_api_mcp/commit/e6271076beb3239ed4631a5d254ff4b33ace0abd))
+
 ## [3.2.0](https://github.com/nhm7/sap_api_mcp/compare/v3.1.13...v3.2.0) (2026-05-19)
 
 
