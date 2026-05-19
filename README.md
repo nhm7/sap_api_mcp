@@ -90,6 +90,8 @@ Search for product packages on SAP Business Accelerator Hub. Useful for finding 
 | `top` | number | Max results (default 20, max 50). |
 | `skip` | number | Number of matching packages to skip for pagination. |
 
+Wildcard and catalog-fallback searches include `returned`, `top`, `skip`, `hasMore`, and `nextSkip` pagination metadata.
+
 ### `search_apis`
 Keyword search across the entire catalog. Results are scoped to the specified package when `packageName` is provided. No login required.
 
@@ -99,6 +101,8 @@ Keyword search across the entire catalog. Results are scoped to the specified pa
 | `packageName` | string | Restrict results to a specific package technical name, e.g. `"SAPS4HANACloud"`. |
 | `apiType` | enum | `SOAP` · `ODATA` · `ODATAV4` · `REST` · `GRAPHQL` |
 | `top` | number | Max results (default 20, max 50). |
+
+When `packageName` is provided, results are read from that package's artifact list to avoid global-search ranking gaps. `packageDisplayName` is included when available.
 
 ### `list_apis`
 All APIs within a specific product package. No login required.
