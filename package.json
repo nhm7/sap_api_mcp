@@ -16,7 +16,7 @@
     "adm-zip": "^0.5.18"
   },
   "devDependencies": {
-    "@types/node": "^25.9.1",
+    "@types/node": "^26.1.2",
     "typescript": "^6.0.3"
   },
   "engines": {
